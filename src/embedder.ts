@@ -1,3 +1,4 @@
+import { requestUrl } from "obsidian";
 import { SemanticGraphSettings } from "./settings";
 
 export interface EmbedResult {
@@ -17,7 +18,8 @@ export async function embedTexts(
     headers["Authorization"] = `Bearer ${settings.apiKey}`;
   }
 
-  const response = await fetch(settings.embeddingEndpoint, {
+  const response = await requestUrl({
+    url: settings.embeddingEndpoint,
     method: "POST",
     headers,
     body: JSON.stringify({
@@ -26,13 +28,12 @@ export async function embedTexts(
     }),
   });
 
-  if (!response.ok) {
-    const err = await response.text();
-    throw new Error(`Embedding API error ${response.status}: ${err}`);
+  if (response.status < 200 || response.status >= 300) {
+    throw new Error(`Embedding API error ${response.status}: ${response.text}`);
   }
 
-  const data = await response.json();
-  return data.data.map((d: { embedding: number[] }) => d.embedding);
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  return response.json.data.map((d: any) => d.embedding);
 }
 
 export function cosineSimilarity(a: number[], b: number[]): number {

@@ -1,6 +1,6 @@
 {
   "name": "obsidian-semantic-graph",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "Semantic similarity graph for Obsidian — cluster notes by meaning, not just links",
   "main": "main.js",
   "scripts": {
@@ -8,7 +8,13 @@
     "build": "tsc --noEmit --skipLibCheck && node esbuild.config.mjs production",
     "version": "node version-bump.mjs && git add manifest.json versions.json"
   },
-  "keywords": ["obsidian", "graph", "semantic", "embeddings", "ai"],
+  "keywords": [
+    "obsidian",
+    "graph",
+    "semantic",
+    "embeddings",
+    "ai"
+  ],
   "author": "BioInfo",
   "license": "MIT",
   "devDependencies": {

@@ -3,6 +3,7 @@ import {
   Notice,
   Plugin,
   PluginSettingTab,
+  requestUrl,
   Setting,
   TFile,
 } from "obsidian";
@@ -15,10 +16,18 @@ export default class SemanticGraphPlugin extends Plugin {
   settings: SemanticGraphSettings;
   store: IndexStore;
 
+  /** Vault-scoped localStorage adapter using Obsidian's App storage API */
+  private get lsAdapter() {
+    return {
+      getItem: (k: string) => this.app.loadLocalStorage(k) as string | null,
+      setItem: (k: string, v: string) => this.app.saveLocalStorage(k, v),
+    };
+  }
+
   async onload() {
     await this.loadSettings();
     this.store = new IndexStore();
-    this.store.load(localStorage);
+    this.store.load(this.lsAdapter);
 
     // Register the graph view
     this.registerView(
@@ -27,21 +36,21 @@ export default class SemanticGraphPlugin extends Plugin {
     );
 
     // Ribbon icon
-    this.addRibbonIcon("git-fork", "Semantic Graph", () => {
-      this.activateView();
+    this.addRibbonIcon("git-fork", "Semantic graph", () => {
+      void this.activateView();
     });
 
     // Commands
     this.addCommand({
-      id: "open-semantic-graph",
-      name: "Open semantic graph",
-      callback: () => this.activateView(),
+      id: "open-graph",
+      name: "Open graph",
+      callback: () => void this.activateView(),
     });
 
     this.addCommand({
       id: "index-vault",
-      name: "Index vault (embed all notes)",
-      callback: () => this.indexVault(),
+      name: "Index vault",
+      callback: () => void this.indexVault(),
     });
 
     this.addCommand({
@@ -49,8 +58,8 @@ export default class SemanticGraphPlugin extends Plugin {
       name: "Clear index",
       callback: () => {
         this.store.clear();
-        this.store.save(localStorage);
-        new Notice("Semantic Graph: Index cleared.");
+        this.store.save(this.lsAdapter);
+        new Notice("Index cleared.");
       },
     });
 
@@ -59,7 +68,7 @@ export default class SemanticGraphPlugin extends Plugin {
       this.registerEvent(
         this.app.vault.on("modify", (file) => {
           if (file instanceof TFile && file.extension === "md") {
-            this.indexFile(file);
+            void this.indexFile(file);
           }
         })
       );
@@ -68,11 +77,11 @@ export default class SemanticGraphPlugin extends Plugin {
     // Settings tab
     this.addSettingTab(new SemanticGraphSettingTab(this.app, this));
 
-    console.log("Semantic Graph plugin loaded.");
+    console.debug("Semantic Graph plugin loaded.");
   }
 
   onunload() {
-    this.store.save(localStorage);
+    this.store.save(this.lsAdapter);
   }
 
   async activateView() {
@@ -88,10 +97,10 @@ export default class SemanticGraphPlugin extends Plugin {
   async indexFile(file: TFile) {
     try {
       const content = await this.app.vault.cachedRead(file);
-      const text = content.slice(0, 2000); // First 2K chars is enough for embedding
+      const text = content.slice(0, 2000);
       const [vector] = await embedTexts([text], this.settings);
       this.store.set(file.path, { vector, indexedAt: Date.now() });
-      this.store.save(localStorage);
+      this.store.save(this.lsAdapter);
     } catch (e) {
       console.warn(`Semantic Graph: failed to embed ${file.path}:`, e);
     }
@@ -102,7 +111,7 @@ export default class SemanticGraphPlugin extends Plugin {
       .getMarkdownFiles()
       .slice(0, this.settings.maxNotes);
 
-    new Notice(`Semantic Graph: Indexing ${files.length} notes…`);
+    new Notice(`Indexing ${files.length} notes…`);
 
     // Process in batches of 16
     const batchSize = 16;
@@ -119,12 +128,12 @@ export default class SemanticGraphPlugin extends Plugin {
         });
         done += batch.length;
       } catch (e) {
-        new Notice(`Semantic Graph: Error in batch ${i / batchSize + 1}: ${e}`);
+        new Notice(`Error in batch ${i / batchSize + 1}: ${e}`);
       }
     }
 
-    this.store.save(localStorage);
-    new Notice(`Semantic Graph: Indexed ${done} notes ✓`);
+    this.store.save(this.lsAdapter);
+    new Notice(`Indexed ${done} notes ✓`);
 
     // Refresh open view if any
     const leaf = this.app.workspace.getLeavesOfType(SEMANTIC_GRAPH_VIEW)[0];
@@ -151,7 +160,8 @@ class SemanticGraphSettingTab extends PluginSettingTab {
   display(): void {
     const { containerEl } = this;
     containerEl.empty();
-    containerEl.createEl("h2", { text: "Semantic Graph" });
+
+    new Setting(containerEl).setName("Semantic graph").setHeading();
 
     new Setting(containerEl)
       .setName("Embedding endpoint")
@@ -256,15 +266,15 @@ class SemanticGraphSettingTab extends PluginSettingTab {
           try {
             const headers: Record<string, string> = { "Content-Type": "application/json" };
             if (this.plugin.settings.apiKey) headers["Authorization"] = `Bearer ${this.plugin.settings.apiKey}`;
-            const res = await fetch(this.plugin.settings.embeddingEndpoint, {
+            const res = await requestUrl({
+              url: this.plugin.settings.embeddingEndpoint,
               method: "POST",
               headers,
               body: JSON.stringify({ input: "connection test", model: this.plugin.settings.model }),
             });
-            const data = await res.json();
-            const dims = data?.data?.[0]?.embedding?.length;
+            const dims = res.json?.data?.[0]?.embedding?.length;
             if (dims) new Notice(`✓ Connected — ${dims}-dim embedding received`);
-            else new Notice(`✗ Unexpected response: ${JSON.stringify(data).slice(0, 120)}`);
+            else new Notice(`✗ Unexpected response: ${JSON.stringify(res.json).slice(0, 120)}`);
           } catch (e) {
             new Notice(`✗ Connection failed: ${e}`);
           }

@@ -1,4 +1,4 @@
-import { ItemView, WorkspaceLeaf } from "obsidian";
+import { ItemView, TFile, WorkspaceLeaf } from "obsidian";
 import { cosineSimilarity, kMeansClusters } from "./embedder";
 import { IndexStore } from "./index-store";
 import { SemanticGraphSettings } from "./settings";
@@ -71,11 +71,11 @@ export class SemanticGraphView extends ItemView {
   }
 
   getViewType() { return SEMANTIC_GRAPH_VIEW; }
-  getDisplayText() { return "Semantic Graph"; }
+  getDisplayText() { return "Semantic graph"; }
   getIcon() { return "git-fork"; }
 
-  async onOpen() { this.render(); }
-  async onClose() { this.stopSim(); }
+  onOpen(): Promise<void> { this.render(); return Promise.resolve(); }
+  onClose(): Promise<void> { this.stopSim(); return Promise.resolve(); }
   updateSettings(s: SemanticGraphSettings) { this.settings = s; }
 
   render() {
@@ -95,7 +95,7 @@ export class SemanticGraphView extends ItemView {
 
     if (entries.length === 0) {
       const msg = container.createEl("div", {
-        text: "No notes indexed yet. Run 'Semantic Graph: Index vault' from the command palette.",
+        text: "No notes indexed yet. Run 'Index vault' from the command palette.",
       });
       Object.assign(msg.style, {
         color: "#555", textAlign: "center", marginTop: "40vh",
@@ -138,9 +138,10 @@ export class SemanticGraphView extends ItemView {
       position: "absolute", pointerEvents: "none", zIndex: "20",
       background: "rgba(13,13,13,0.92)", border: "1px solid rgba(255,255,255,0.1)",
       borderRadius: "6px", padding: "7px 11px", fontSize: "12px",
-      color: "#e0e0e0", display: "none", maxWidth: "260px",
+      color: "#e0e0e0", maxWidth: "260px",
       boxShadow: "0 4px 16px rgba(0,0,0,0.6)", lineHeight: "1.5",
     });
+    this.tooltipEl.hide();
 
     // ── Legend (bottom-left) ────────────────────────────────────────────
     const legend = container.createEl("div");
@@ -152,7 +153,7 @@ export class SemanticGraphView extends ItemView {
 
     // ── Canvas ──────────────────────────────────────────────────────────
     const canvas = document.createElement("canvas");
-    canvas.style.cssText = "display:block;position:absolute;top:0;left:0;";
+    canvas.setCssProps({ display: "block", position: "absolute", top: "0", left: "0" });
     container.appendChild(canvas);
     this.canvas = canvas;
     this.ctx = canvas.getContext("2d");
@@ -190,12 +191,12 @@ export class SemanticGraphView extends ItemView {
         // Marquee zoom mode
         this.marqueeActive = true;
         this.marquee = { x0: cx, y0: cy, x1: cx, y1: cy };
-        canvas.style.cursor = "crosshair";
+        canvas.setCssProps({ cursor: "crosshair" });
       } else {
         // Pan mode
         this.dragging = true;
         this.dragStart = { x: e.clientX, y: e.clientY, tx: this.tx, ty: this.ty };
-        canvas.style.cursor = "grabbing";
+        canvas.setCssProps({ cursor: "grabbing" });
       }
     });
 
@@ -208,7 +209,7 @@ export class SemanticGraphView extends ItemView {
         this.marquee.x1 = this.mouseX;
         this.marquee.y1 = this.mouseY;
         this.dragMoved = true;
-        this.draw(); // redraw with marquee overlay
+        this.draw();
         return;
       }
 
@@ -217,21 +218,23 @@ export class SemanticGraphView extends ItemView {
         if (Math.abs(dx) + Math.abs(dy) > 3) this.dragMoved = true;
         this.tx = this.dragStart.tx + dx;
         this.ty = this.dragStart.ty + dy;
-        this.draw(); // ← was missing: redraw on pan
+        this.draw();
       }
 
       this.updateHover();
     };
 
     window.addEventListener("mousemove", onMove);
-    window.addEventListener("mouseup", (e) => {
+    window.addEventListener("mouseup", () => {
       if (this.marqueeActive && this.marquee && this.dragMoved) {
         this.zoomToMarquee(this.marquee);
       }
       this.marqueeActive = false;
       this.marquee = null;
       this.dragging = false;
-      if (this.canvas) this.canvas.style.cursor = this.hoveredIdx >= 0 ? "pointer" : "default";
+      if (this.canvas) {
+        this.canvas.setCssProps({ cursor: this.hoveredIdx >= 0 ? "pointer" : "default" });
+      }
       this.draw();
     });
 
@@ -242,7 +245,7 @@ export class SemanticGraphView extends ItemView {
       if (this.hoveredIdx >= 0) {
         const n = this.nodes[this.hoveredIdx];
         const file = this.app.vault.getAbstractFileByPath(n.id);
-        if (file) this.app.workspace.getLeaf().openFile(file as any);
+        if (file instanceof TFile) void this.app.workspace.getLeaf().openFile(file);
       }
     });
 
@@ -334,7 +337,7 @@ export class SemanticGraphView extends ItemView {
       if (this.alpha < 0.002) {
         if (this.statusEl) this.statusEl.textContent =
           `${this.nodes.length} notes · ${this.edges.length} connections · ${this.settings.clusterCount} clusters`;
-        this.fitToView(true);  // auto-fit when layout settles
+        this.fitToView(true);
         this.draw();
         return;
       }
@@ -436,7 +439,7 @@ export class SemanticGraphView extends ItemView {
     const targetScale = Math.min(
       (this.W - PAD * 2) / gW,
       (this.H - PAD * 2) / gH,
-      1.5  // don't over-zoom for small graphs
+      1.5
     );
     const targetTx = (this.W - gW * targetScale) / 2 - minX * targetScale;
     const targetTy = (this.H - gH * targetScale) / 2 - minY * targetScale;
@@ -469,8 +472,7 @@ export class SemanticGraphView extends ItemView {
     const sx = Math.min(m.x0, m.x1), sy = Math.min(m.y0, m.y1);
     const ex = Math.max(m.x0, m.x1), ey = Math.max(m.y0, m.y1);
     const sw = ex - sx, sh = ey - sy;
-    if (sw < 10 || sh < 10) return; // too small
-    // Convert screen rect to world rect
+    if (sw < 10 || sh < 10) return;
     const wx0 = (sx - this.tx) / this.scale, wy0 = (sy - this.ty) / this.scale;
     const wx1 = (ex - this.tx) / this.scale, wy1 = (ey - this.ty) / this.scale;
     const gW = wx1 - wx0, gH = wy1 - wy0;
@@ -483,7 +485,6 @@ export class SemanticGraphView extends ItemView {
     const targetTx = (this.W - gW * targetScale) / 2 - wx0 * targetScale;
     const targetTy = (this.H - gH * targetScale) / 2 - wy0 * targetScale;
 
-    // Animate
     const startScale = this.scale, startTx = this.tx, startTy = this.ty;
     const start = performance.now();
     const animate = (now: number) => {
@@ -501,7 +502,6 @@ export class SemanticGraphView extends ItemView {
   // ── Hover ──────────────────────────────────────────────────────────────
   private updateHover() {
     if (!this.canvas) return;
-    // Convert screen → world
     const wx = (this.mouseX - this.tx) / this.scale;
     const wy = (this.mouseY - this.ty) / this.scale;
 
@@ -515,7 +515,7 @@ export class SemanticGraphView extends ItemView {
 
     if (best !== this.hoveredIdx) {
       this.hoveredIdx = best;
-      this.canvas.style.cursor = best >= 0 ? "pointer" : (this.dragging ? "grabbing" : "default");
+      this.canvas.setCssProps({ cursor: best >= 0 ? "pointer" : (this.dragging ? "grabbing" : "default") });
     }
 
     // Tooltip
@@ -523,12 +523,18 @@ export class SemanticGraphView extends ItemView {
       if (best >= 0) {
         const n = this.nodes[best];
         const [cr, cg, cb] = CLUSTER_COLORS[n.cluster % CLUSTER_COLORS.length];
-        this.tooltipEl.innerHTML =
-          `<div style="font-weight:600;color:#f0f0f0;margin-bottom:3px">${n.label}</div>` +
-          `<div style="color:#666;font-size:10px;margin-bottom:4px">${n.folder}</div>` +
-          `<div style="display:flex;gap:10px;font-size:10px;color:#888">` +
-          `<span style="color:rgb(${cr},${cg},${cb})">● cluster ${n.cluster + 1}</span>` +
-          `<span>${n.degree} connections</span></div>`;
+
+        this.tooltipEl.empty();
+        const titleEl = this.tooltipEl.createEl("div", { text: n.label });
+        titleEl.setCssProps({ "font-weight": "600", "color": "#f0f0f0", "margin-bottom": "3px" });
+        const folderEl = this.tooltipEl.createEl("div", { text: n.folder });
+        folderEl.setCssProps({ "color": "#666", "font-size": "10px", "margin-bottom": "4px" });
+        const statsEl = this.tooltipEl.createEl("div");
+        statsEl.setCssProps({ "display": "flex", "gap": "10px", "font-size": "10px", "color": "#888" });
+        const clusterSpan = statsEl.createEl("span", { text: `● cluster ${n.cluster + 1}` });
+        clusterSpan.setCssProps({ "color": `rgb(${cr},${cg},${cb})` });
+        statsEl.createEl("span", { text: `${n.degree} connections` });
+
         // Position: follow cursor with smart edge avoidance
         const TW = 200, TH = 72;
         let lx = this.mouseX + 14, ly = this.mouseY - 10;
@@ -537,13 +543,12 @@ export class SemanticGraphView extends ItemView {
         if (ly < 10) ly = 10;
         this.tooltipEl.style.left = lx + "px";
         this.tooltipEl.style.top = ly + "px";
-        this.tooltipEl.style.display = "block";
+        this.tooltipEl.show();
       } else {
-        this.tooltipEl.style.display = "none";
+        this.tooltipEl.hide();
       }
     }
 
-    // Only redraw if hover changed
     if (best !== this.hoveredIdx) this.draw();
   }
 
@@ -600,7 +605,6 @@ export class SemanticGraphView extends ItemView {
       const r = isHov ? n.r * 2.2 : n.r;
 
       if (!isDim) {
-        // Outer glow
         const og = ctx.createRadialGradient(n.x, n.y, 0, n.x, n.y, r * 6);
         og.addColorStop(0, `rgba(${cr},${cg},${cb},${isHov ? 0.3 : 0.15})`);
         og.addColorStop(0.5, `rgba(${cr},${cg},${cb},${isHov ? 0.1 : 0.05})`);
@@ -608,7 +612,6 @@ export class SemanticGraphView extends ItemView {
         ctx.beginPath(); ctx.arc(n.x, n.y, r * 6, 0, Math.PI * 2);
         ctx.fillStyle = og; ctx.fill();
 
-        // Inner bloom
         const ig = ctx.createRadialGradient(n.x, n.y, 0, n.x, n.y, r * 2.5);
         ig.addColorStop(0, `rgba(${cr},${cg},${cb},${isHov ? 0.8 : 0.55})`);
         ig.addColorStop(1, "rgba(0,0,0,0)");
@@ -616,14 +619,12 @@ export class SemanticGraphView extends ItemView {
         ctx.fillStyle = ig; ctx.fill();
       }
 
-      // Core
       ctx.beginPath(); ctx.arc(n.x, n.y, r, 0, Math.PI * 2);
       ctx.fillStyle = isDim
         ? `rgba(${cr},${cg},${cb},0.18)`
         : `rgb(${cr},${cg},${cb})`;
       ctx.fill();
 
-      // Specular
       if (!isDim) {
         ctx.beginPath();
         ctx.arc(n.x - r * 0.25, n.y - r * 0.25, r * 0.5, 0, Math.PI * 2);
