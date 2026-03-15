@@ -125,7 +125,11 @@ export class SemanticGraphView extends ItemView {
     const resize = () => {
       const r = container.getBoundingClientRect();
       this.W = r.width || 900; this.H = r.height || 700;
-      canvas.width = this.W; canvas.height = this.H;
+      const dpr = window.devicePixelRatio || 1;
+      canvas.width = this.W * dpr; canvas.height = this.H * dpr;
+      canvas.style.width = this.W + "px"; canvas.style.height = this.H + "px";
+      this.ctx = canvas.getContext("2d");
+      if (this.ctx) this.ctx.scale(dpr, dpr);
       this.draw();
     };
     resize();
@@ -207,7 +211,7 @@ export class SemanticGraphView extends ItemView {
         cluster: clusters[i],
         x: 0, y: 0, vx: 0, vy: 0,
         degree: deg,
-        r: Math.max(2.5, Math.min(6, 2.5 + Math.log1p(deg) * 0.7)),
+        r: Math.max(3.5, Math.min(8, 3.5 + Math.log1p(deg) * 0.9)),
       };
     });
   }
@@ -343,7 +347,7 @@ export class SemanticGraphView extends ItemView {
     const W = this.W, H = this.H;
 
     ctx.clearRect(0, 0, W, H);
-    ctx.fillStyle = "#080808";
+    ctx.fillStyle = "#0d0d0d";
     ctx.fillRect(0, 0, W, H);
 
     ctx.save();
@@ -366,17 +370,17 @@ export class SemanticGraphView extends ItemView {
     this.edges.forEach(e => {
       const a = this.nodes[e.si], b = this.nodes[e.ti];
       const isHighlighted = hovered && (e.si === this.hoveredIdx || e.ti === this.hoveredIdx);
-      const baseAlpha = 0.06 + (e.weight - t) * 0.3;
+      const baseAlpha = 0.15 + (e.weight - t) * 0.5;
       ctx.beginPath();
       ctx.moveTo(a.x, a.y);
       ctx.lineTo(b.x, b.y);
       if (isHighlighted) {
         const [r, g, b2] = CLUSTER_COLORS[this.nodes[this.hoveredIdx].cluster % CLUSTER_COLORS.length];
-        ctx.strokeStyle = `rgba(${r},${g},${b2},0.7)`;
-        ctx.lineWidth = 0.8;
+        ctx.strokeStyle = `rgba(${r},${g},${b2},0.85)`;
+        ctx.lineWidth = 1.2;
       } else {
-        ctx.strokeStyle = `rgba(255,255,255,${baseAlpha})`;
-        ctx.lineWidth = 0.3 + (e.weight - t) * 0.5;
+        ctx.strokeStyle = `rgba(200,200,200,${baseAlpha})`;
+        ctx.lineWidth = 0.5 + (e.weight - t) * 0.8;
       }
       ctx.stroke();
     });
@@ -389,41 +393,46 @@ export class SemanticGraphView extends ItemView {
       const isDimmed = hovered && !isHov && !isConnected;
 
       const alpha = isDimmed ? 0.2 : 1.0;
-      const r = isHov ? n.r * 2.2 : n.r;
+      const r = isHov ? n.r * 2.5 : n.r;
 
-      // Outer glow (large, very soft)
+      // Outer glow (large, soft halo)
       if (!isDimmed) {
-        const grad = ctx.createRadialGradient(n.x, n.y, 0, n.x, n.y, r * 5);
-        grad.addColorStop(0, `rgba(${cr},${cg},${cb},${isHov ? 0.18 : 0.06})`);
+        const glowR = r * 6;
+        const grad = ctx.createRadialGradient(n.x, n.y, 0, n.x, n.y, glowR);
+        grad.addColorStop(0, `rgba(${cr},${cg},${cb},${isHov ? 0.35 : 0.18})`);
+        grad.addColorStop(0.4, `rgba(${cr},${cg},${cb},${isHov ? 0.12 : 0.06})`);
         grad.addColorStop(1, "rgba(0,0,0,0)");
         ctx.beginPath();
-        ctx.arc(n.x, n.y, r * 5, 0, Math.PI * 2);
+        ctx.arc(n.x, n.y, glowR, 0, Math.PI * 2);
         ctx.fillStyle = grad;
         ctx.fill();
       }
 
-      // Inner glow (medium)
+      // Inner bloom
       if (!isDimmed) {
-        const ig = ctx.createRadialGradient(n.x, n.y, 0, n.x, n.y, r * 2.2);
-        ig.addColorStop(0, `rgba(${cr},${cg},${cb},${isHov ? 0.6 : 0.3})`);
+        const bloomR = r * 2.8;
+        const ig = ctx.createRadialGradient(n.x, n.y, 0, n.x, n.y, bloomR);
+        ig.addColorStop(0, `rgba(${cr},${cg},${cb},${isHov ? 0.85 : 0.6})`);
         ig.addColorStop(1, "rgba(0,0,0,0)");
         ctx.beginPath();
-        ctx.arc(n.x, n.y, r * 2.2, 0, Math.PI * 2);
+        ctx.arc(n.x, n.y, bloomR, 0, Math.PI * 2);
         ctx.fillStyle = ig;
         ctx.fill();
       }
 
-      // Core dot
+      // Core dot — always solid
       ctx.beginPath();
       ctx.arc(n.x, n.y, r, 0, Math.PI * 2);
-      ctx.fillStyle = `rgba(${cr},${cg},${cb},${alpha * (isHov ? 1 : 0.85)})`;
+      ctx.fillStyle = isDimmed
+        ? `rgba(${cr},${cg},${cb},0.25)`
+        : `rgb(${cr},${cg},${cb})`;
       ctx.fill();
 
-      // Bright center highlight
+      // Specular highlight
       if (!isDimmed) {
         ctx.beginPath();
-        ctx.arc(n.x - r * 0.2, n.y - r * 0.2, r * 0.45, 0, Math.PI * 2);
-        ctx.fillStyle = `rgba(255,255,255,${isHov ? 0.9 : 0.55})`;
+        ctx.arc(n.x - r * 0.25, n.y - r * 0.25, r * 0.5, 0, Math.PI * 2);
+        ctx.fillStyle = `rgba(255,255,255,${isHov ? 0.95 : 0.7})`;
         ctx.fill();
       }
 
