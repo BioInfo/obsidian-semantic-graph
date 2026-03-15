@@ -1,7 +1,7 @@
 {
   "name": "obsidian-semantic-graph",
-  "version": "0.1.3",
-  "description": "Semantic similarity graph for Obsidian — cluster notes by meaning, not just links",
+  "version": "0.1.4",
+  "description": "Semantic similarity graph for Obsidian \u2014 cluster notes by meaning, not just links",
   "main": "main.js",
   "scripts": {
     "dev": "node esbuild.config.mjs",

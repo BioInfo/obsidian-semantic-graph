@@ -163,7 +163,7 @@ class SemanticGraphSettingTab extends PluginSettingTab {
 
     new Setting(containerEl)
       .setName("Embedding endpoint")
-      .setDesc("Embedding API endpoint (OpenAI-compatible /v1/embeddings).")
+      .setDesc("OpenAI-compatible /v1/embeddings endpoint.")
       .addText((text) =>
         text
           .setPlaceholder("https://api.openai.com/v1/embeddings")
@@ -192,7 +192,7 @@ class SemanticGraphSettingTab extends PluginSettingTab {
       .setDesc("Embedding model name to send to the API.")
       .addText((text) =>
         text
-          .setPlaceholder("Model name, e.g. text-embedding-3-small")
+          .setPlaceholder("Embedding model name")
           .setValue(this.plugin.settings.model)
           .onChange(async (value) => {
             this.plugin.settings.model = value;

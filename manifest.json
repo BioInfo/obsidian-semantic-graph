@@ -1,9 +1,9 @@
 {
   "id": "semantic-graph",
   "name": "Semantic Graph",
-  "version": "0.1.3",
+  "version": "0.1.4",
   "minAppVersion": "1.0.0",
-  "description": "Visualize your vault as a semantic similarity graph — notes cluster by meaning, not just links. Works with any OpenAI-compatible embedding endpoint (local or cloud).",
+  "description": "Visualize your vault as a semantic similarity graph \u2014 notes cluster by meaning, not just links. Works with any OpenAI-compatible embedding endpoint (local or cloud).",
   "author": "BioInfo",
   "authorUrl": "https://github.com/BioInfo",
   "fundingUrl": "https://github.com/BioInfo/obsidian-semantic-graph",
