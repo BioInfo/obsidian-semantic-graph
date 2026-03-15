@@ -32,8 +32,7 @@ export async function embedTexts(
     throw new Error(`Embedding API error ${response.status}: ${response.text}`);
   }
 
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  return response.json.data.map((d: any) => d.embedding);
+  return (response.json.data as { embedding: number[] }[]).map((d) => d.embedding);
 }
 
 export function cosineSimilarity(a: number[], b: number[]): number {

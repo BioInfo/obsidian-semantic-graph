@@ -95,7 +95,7 @@ export class SemanticGraphView extends ItemView {
 
     if (entries.length === 0) {
       const msg = container.createEl("div", {
-        text: "No notes indexed yet. Run 'Index vault' from the command palette.",
+        text: "No notes indexed yet. Run 'index vault' from the command palette.",
       });
       Object.assign(msg.style, {
         color: "#555", textAlign: "center", marginTop: "40vh",

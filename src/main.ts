@@ -36,7 +36,7 @@ export default class SemanticGraphPlugin extends Plugin {
     );
 
     // Ribbon icon
-    this.addRibbonIcon("git-fork", "Semantic graph", () => {
+    this.addRibbonIcon("git-fork", "Open semantic graph", () => {
       void this.activateView();
     });
 
@@ -77,7 +77,7 @@ export default class SemanticGraphPlugin extends Plugin {
     // Settings tab
     this.addSettingTab(new SemanticGraphSettingTab(this.app, this));
 
-    console.debug("Semantic Graph plugin loaded.");
+    console.debug("Semantic graph plugin loaded.");
   }
 
   onunload() {
@@ -91,7 +91,7 @@ export default class SemanticGraphPlugin extends Plugin {
       leaf = workspace.getRightLeaf(false) ?? workspace.getLeaf(true);
       await leaf.setViewState({ type: SEMANTIC_GRAPH_VIEW, active: true });
     }
-    workspace.revealLeaf(leaf);
+    void workspace.revealLeaf(leaf);
   }
 
   async indexFile(file: TFile) {
@@ -102,7 +102,7 @@ export default class SemanticGraphPlugin extends Plugin {
       this.store.set(file.path, { vector, indexedAt: Date.now() });
       this.store.save(this.lsAdapter);
     } catch (e) {
-      console.warn(`Semantic Graph: failed to embed ${file.path}:`, e);
+      console.warn(`Semantic graph: failed to embed ${file.path}:`, e);
     }
   }
 
@@ -133,7 +133,7 @@ export default class SemanticGraphPlugin extends Plugin {
     }
 
     this.store.save(this.lsAdapter);
-    new Notice(`Indexed ${done} notes ✓`);
+    new Notice(`Indexed ${done} notes.`);
 
     // Refresh open view if any
     const leaf = this.app.workspace.getLeavesOfType(SEMANTIC_GRAPH_VIEW)[0];
@@ -161,14 +161,14 @@ class SemanticGraphSettingTab extends PluginSettingTab {
     const { containerEl } = this;
     containerEl.empty();
 
-    new Setting(containerEl).setName("Semantic graph").setHeading();
+    new Setting(containerEl).setName("Settings").setHeading();
 
     new Setting(containerEl)
       .setName("Embedding endpoint")
-      .setDesc("OpenAI-compatible /v1/embeddings URL (local or cloud)")
+      .setDesc("OpenAI-compatible /v1/embeddings URL (local or cloud).")
       .addText((text) =>
         text
-          .setPlaceholder("http://localhost:4001/v1/embeddings")
+          .setPlaceholder("https://api.openai.com/v1/embeddings")
           .setValue(this.plugin.settings.embeddingEndpoint)
           .onChange(async (value) => {
             this.plugin.settings.embeddingEndpoint = value;
@@ -178,7 +178,7 @@ class SemanticGraphSettingTab extends PluginSettingTab {
 
     new Setting(containerEl)
       .setName("API key")
-      .setDesc("Optional — leave blank for local endpoints without auth")
+      .setDesc("Optional — leave blank for local endpoints without auth.")
       .addText((text) =>
         text
           .setPlaceholder("sk-...")
@@ -191,10 +191,10 @@ class SemanticGraphSettingTab extends PluginSettingTab {
 
     new Setting(containerEl)
       .setName("Model")
-      .setDesc("Embedding model name sent to the API")
+      .setDesc("Embedding model name sent to the API.")
       .addText((text) =>
         text
-          .setPlaceholder("all-mpnet-base-v2")
+          .setPlaceholder("text-embedding-3-small")
           .setValue(this.plugin.settings.model)
           .onChange(async (value) => {
             this.plugin.settings.model = value;
@@ -218,7 +218,7 @@ class SemanticGraphSettingTab extends PluginSettingTab {
 
     new Setting(containerEl)
       .setName("Cluster count")
-      .setDesc("Number of topic clusters (colors) in the graph")
+      .setDesc("Number of topic clusters (colors) in the graph.")
       .addSlider((slider) =>
         slider
           .setLimits(2, 16, 1)
@@ -232,7 +232,7 @@ class SemanticGraphSettingTab extends PluginSettingTab {
 
     new Setting(containerEl)
       .setName("Max notes")
-      .setDesc("Cap on notes rendered (for performance)")
+      .setDesc("Cap on notes rendered (for performance).")
       .addText((text) =>
         text
           .setValue(String(this.plugin.settings.maxNotes))
@@ -247,7 +247,7 @@ class SemanticGraphSettingTab extends PluginSettingTab {
 
     new Setting(containerEl)
       .setName("Auto-index on save")
-      .setDesc("Re-embed a note whenever you save it (requires restart to take effect)")
+      .setDesc("Re-embed a note whenever you save it (requires restart to take effect).")
       .addToggle((toggle) =>
         toggle
           .setValue(this.plugin.settings.autoIndexOnSave)
@@ -260,12 +260,14 @@ class SemanticGraphSettingTab extends PluginSettingTab {
     // Test connection button
     new Setting(containerEl)
       .setName("Test connection")
-      .setDesc("Verify your embedding endpoint is reachable")
+      .setDesc("Verify your embedding endpoint is reachable.")
       .addButton((btn) =>
         btn.setButtonText("Test").onClick(async () => {
           try {
             const headers: Record<string, string> = { "Content-Type": "application/json" };
-            if (this.plugin.settings.apiKey) headers["Authorization"] = `Bearer ${this.plugin.settings.apiKey}`;
+            if (this.plugin.settings.apiKey) {
+              headers["Authorization"] = `Bearer ${this.plugin.settings.apiKey}`;
+            }
             const res = await requestUrl({
               url: this.plugin.settings.embeddingEndpoint,
               method: "POST",
@@ -273,10 +275,13 @@ class SemanticGraphSettingTab extends PluginSettingTab {
               body: JSON.stringify({ input: "connection test", model: this.plugin.settings.model }),
             });
             const dims = res.json?.data?.[0]?.embedding?.length;
-            if (dims) new Notice(`✓ Connected — ${dims}-dim embedding received`);
-            else new Notice(`✗ Unexpected response: ${JSON.stringify(res.json).slice(0, 120)}`);
+            if (dims) {
+              new Notice(`Connected — ${dims}-dim embedding received.`);
+            } else {
+              new Notice(`Unexpected response: ${JSON.stringify(res.json).slice(0, 120)}`);
+            }
           } catch (e) {
-            new Notice(`✗ Connection failed: ${e}`);
+            new Notice(`Connection failed: ${e}`);
           }
         })
       );
