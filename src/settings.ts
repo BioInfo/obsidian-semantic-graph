@@ -9,11 +9,11 @@ export interface SemanticGraphSettings {
 }
 
 export const DEFAULT_SETTINGS: SemanticGraphSettings = {
-  embeddingEndpoint: "http://localhost:4001/v1/embeddings",
+  embeddingEndpoint: "https://api.openai.com/v1/embeddings",
   apiKey: "",
-  model: "all-mpnet-base-v2",
-  similarityThreshold: 0.4,
+  model: "text-embedding-3-small",
+  similarityThreshold: 0.65,
   clusterCount: 8,
   maxNotes: 500,
-  autoIndexOnSave: true,
+  autoIndexOnSave: false,
 };
