@@ -5,19 +5,18 @@ import { SemanticGraphSettings } from "./settings";
 
 export const SEMANTIC_GRAPH_VIEW = "semantic-graph-view";
 
-// Cluster palette — vibrant but works on dark bg
-const CLUSTER_COLORS = [
-  [118, 185, 0],   // NVIDIA green
-  [74, 158, 255],  // blue
-  [255, 107, 107], // red
-  [255, 217, 61],  // yellow
-  [107, 203, 119], // green
-  [199, 125, 255], // purple
-  [255, 159, 67],  // orange
-  [72, 202, 228],  // cyan
-  [247, 37, 133],  // pink
-  [181, 228, 140], // lime
-] as [number, number, number][];
+const CLUSTER_COLORS: [number, number, number][] = [
+  [118, 185,   0],  // 0 NVIDIA green
+  [ 74, 158, 255],  // 1 blue
+  [255, 107, 107],  // 2 red
+  [255, 217,  61],  // 3 yellow
+  [107, 203, 119],  // 4 green
+  [199, 125, 255],  // 5 purple
+  [255, 159,  67],  // 6 orange
+  [ 72, 202, 228],  // 7 cyan
+  [247,  37, 133],  // 8 pink
+  [181, 228, 140],  // 9 lime
+];
 
 function isJunkFilename(name: string): boolean {
   if (name.length > 60) return true;
@@ -27,7 +26,7 @@ function isJunkFilename(name: string): boolean {
 }
 
 interface Node {
-  id: string; label: string; cluster: number;
+  id: string; label: string; folder: string; cluster: number;
   x: number; y: number; vx: number; vy: number;
   degree: number; r: number;
 }
@@ -45,19 +44,23 @@ export class SemanticGraphView extends ItemView {
   // Pan/zoom
   private tx = 0; private ty = 0; private scale = 1;
   private dragging = false;
+  private dragMoved = false;
   private dragStart = { x: 0, y: 0, tx: 0, ty: 0 };
 
   // Canvas
   private canvas: HTMLCanvasElement | null = null;
   private ctx: CanvasRenderingContext2D | null = null;
   private W = 900; private H = 700;
+  private dpr = 1;
 
-  // Hover state
+  // Hover / tooltip
   private hoveredIdx = -1;
   private mouseX = 0; private mouseY = 0;
+  private tooltipEl: HTMLElement | null = null;
 
   // Status
   private statusEl: HTMLElement | null = null;
+  private container: HTMLElement | null = null;
 
   constructor(leaf: WorkspaceLeaf, store: IndexStore, settings: SemanticGraphSettings) {
     super(leaf); this.store = store; this.settings = settings;
@@ -74,10 +77,11 @@ export class SemanticGraphView extends ItemView {
   render() {
     this.stopSim();
     const container = this.containerEl.children[1] as HTMLElement;
+    this.container = container;
     container.empty();
     Object.assign(container.style, {
-      background: "#080808", position: "relative",
-      overflow: "hidden", userSelect: "none", fontFamily: "sans-serif",
+      background: "#0d0d0d", position: "relative",
+      overflow: "hidden", userSelect: "none",
     });
 
     const entries = this.store.entries().filter(([p]) => {
@@ -86,92 +90,122 @@ export class SemanticGraphView extends ItemView {
     });
 
     if (entries.length === 0) {
-      const msg = container.createEl("div", { text: "No notes indexed yet. Run 'Semantic Graph: Index vault' from the command palette." });
-      Object.assign(msg.style, { color: "#444", textAlign: "center", marginTop: "40vh", padding: "2rem" });
+      const msg = container.createEl("div", {
+        text: "No notes indexed yet. Run 'Semantic Graph: Index vault' from the command palette.",
+      });
+      Object.assign(msg.style, {
+        color: "#555", textAlign: "center", marginTop: "40vh",
+        padding: "2rem", fontSize: "14px",
+      });
       return;
     }
 
-    // Status overlay
+    // ── Status bar ─────────────────────────────────────────────────────
     this.statusEl = container.createEl("div");
     Object.assign(this.statusEl.style, {
       position: "absolute", top: "12px", left: "16px",
-      fontSize: "11px", color: "#444", zIndex: "10", pointerEvents: "none", letterSpacing: "0.03em",
+      fontSize: "11px", color: "#555", zIndex: "10",
+      pointerEvents: "none", letterSpacing: "0.04em",
     });
 
-    // Controls
+    // ── Controls (top-right) ────────────────────────────────────────────
     const controls = container.createEl("div");
     Object.assign(controls.style, {
-      position: "absolute", top: "8px", right: "12px",
-      zIndex: "10", display: "flex", gap: "6px",
+      position: "absolute", top: "10px", right: "12px",
+      zIndex: "10", display: "flex", gap: "4px", alignItems: "center",
     });
-    [["Reset", () => this.resetView()], ["Re-layout", () => this.reLayout()]].forEach(([label, fn]) => {
-      const b = controls.createEl("button", { text: label as string });
+    const btn = (label: string, title: string, fn: () => void) => {
+      const b = controls.createEl("button", { text: label, title });
       Object.assign(b.style, {
-        background: "rgba(255,255,255,0.04)", border: "1px solid rgba(255,255,255,0.08)",
-        color: "#555", padding: "3px 10px", borderRadius: "4px", cursor: "pointer",
-        fontSize: "11px", letterSpacing: "0.03em",
+        background: "rgba(255,255,255,0.05)", border: "1px solid rgba(255,255,255,0.1)",
+        color: "#666", padding: "2px 9px", borderRadius: "4px", cursor: "pointer",
+        fontSize: "13px", lineHeight: "20px", minWidth: "28px",
       });
-      b.addEventListener("click", fn as () => void);
+      b.addEventListener("click", fn);
+    };
+    btn("+", "Zoom in", () => this.zoom(1.3));
+    btn("−", "Zoom out", () => this.zoom(0.77));
+    btn("⊡", "Fit to view", () => this.fitToView());
+    btn("↺", "Re-layout", () => this.reLayout());
+
+    // ── Tooltip ─────────────────────────────────────────────────────────
+    this.tooltipEl = container.createEl("div");
+    Object.assign(this.tooltipEl.style, {
+      position: "absolute", pointerEvents: "none", zIndex: "20",
+      background: "rgba(13,13,13,0.92)", border: "1px solid rgba(255,255,255,0.1)",
+      borderRadius: "6px", padding: "7px 11px", fontSize: "12px",
+      color: "#e0e0e0", display: "none", maxWidth: "260px",
+      boxShadow: "0 4px 16px rgba(0,0,0,0.6)", lineHeight: "1.5",
     });
 
-    // Canvas
+    // ── Legend (bottom-left) ────────────────────────────────────────────
+    const legend = container.createEl("div");
+    Object.assign(legend.style, {
+      position: "absolute", bottom: "12px", left: "14px",
+      zIndex: "10", display: "flex", flexWrap: "wrap", gap: "6px",
+      maxWidth: "260px", pointerEvents: "none",
+    });
+
+    // ── Canvas ──────────────────────────────────────────────────────────
     const canvas = document.createElement("canvas");
-    canvas.style.cssText = "display:block;cursor:crosshair;";
+    canvas.style.cssText = "display:block;position:absolute;top:0;left:0;";
     container.appendChild(canvas);
     this.canvas = canvas;
     this.ctx = canvas.getContext("2d");
 
-    // Size canvas
     const resize = () => {
       const r = container.getBoundingClientRect();
       this.W = r.width || 900; this.H = r.height || 700;
-      const dpr = window.devicePixelRatio || 1;
-      canvas.width = this.W * dpr; canvas.height = this.H * dpr;
+      this.dpr = window.devicePixelRatio || 1;
+      canvas.width = Math.round(this.W * this.dpr);
+      canvas.height = Math.round(this.H * this.dpr);
       canvas.style.width = this.W + "px"; canvas.style.height = this.H + "px";
       this.ctx = canvas.getContext("2d");
-      if (this.ctx) this.ctx.scale(dpr, dpr);
+      if (this.ctx) this.ctx.scale(this.dpr, this.dpr);
       this.draw();
     };
     resize();
     const ro = new ResizeObserver(resize);
     ro.observe(container);
 
-    // Pointer events
+    // ── Mouse events ────────────────────────────────────────────────────
     canvas.addEventListener("wheel", (e) => {
       e.preventDefault();
+      const factor = e.deltaY < 0 ? 1.15 : 0.87;
       const r = canvas.getBoundingClientRect();
-      const mx = e.clientX - r.left, my = e.clientY - r.top;
-      const d = e.deltaY > 0 ? 0.85 : 1.18;
-      const ns = Math.max(0.05, Math.min(10, this.scale * d));
-      this.tx = mx - (mx - this.tx) * (ns / this.scale);
-      this.ty = my - (my - this.ty) * (ns / this.scale);
-      this.scale = ns;
+      this.zoomAt(e.clientX - r.left, e.clientY - r.top, factor);
     }, { passive: false });
 
     canvas.addEventListener("mousedown", (e) => {
       if (e.button !== 0) return;
-      this.dragging = true;
+      this.dragging = true; this.dragMoved = false;
       this.dragStart = { x: e.clientX, y: e.clientY, tx: this.tx, ty: this.ty };
       canvas.style.cursor = "grabbing";
     });
+
     const onMove = (e: MouseEvent) => {
       const r = canvas.getBoundingClientRect();
       this.mouseX = e.clientX - r.left;
       this.mouseY = e.clientY - r.top;
       if (this.dragging) {
-        this.tx = this.dragStart.tx + (e.clientX - this.dragStart.x);
-        this.ty = this.dragStart.ty + (e.clientY - this.dragStart.y);
+        const dx = e.clientX - this.dragStart.x, dy = e.clientY - this.dragStart.y;
+        if (Math.abs(dx) + Math.abs(dy) > 3) this.dragMoved = true;
+        this.tx = this.dragStart.tx + dx;
+        this.ty = this.dragStart.ty + dy;
       }
       this.updateHover();
     };
-    const onUp = () => {
-      if (this.dragging) canvas.style.cursor = "crosshair";
-      this.dragging = false;
-    };
-    canvas.addEventListener("mousemove", onMove);
-    window.addEventListener("mouseup", onUp);
 
-    canvas.addEventListener("click", (e) => {
+    window.addEventListener("mousemove", onMove);
+    window.addEventListener("mouseup", () => {
+      this.dragging = false;
+      if (this.canvas) this.canvas.style.cursor = this.hoveredIdx >= 0 ? "pointer" : "default";
+    });
+
+    canvas.addEventListener("dblclick", () => this.fitToView());
+
+    canvas.addEventListener("click", () => {
+      if (this.dragMoved) return; // was a pan, not a click
       if (this.hoveredIdx >= 0) {
         const n = this.nodes[this.hoveredIdx];
         const file = this.app.vault.getAbstractFileByPath(n.id);
@@ -179,7 +213,28 @@ export class SemanticGraphView extends ItemView {
       }
     });
 
+    // Build data + start
     this.buildGraph(entries);
+
+    // Build legend after clusters are known
+    const seen = new Set<number>();
+    this.nodes.forEach(n => seen.add(n.cluster));
+    [...seen].sort((a, b) => a - b).forEach(ci => {
+      const [r, g, b] = CLUSTER_COLORS[ci % CLUSTER_COLORS.length];
+      const dot = legend.createEl("div");
+      Object.assign(dot.style, {
+        display: "flex", alignItems: "center", gap: "4px",
+        fontSize: "10px", color: "#555",
+      });
+      const sq = dot.createEl("span");
+      Object.assign(sq.style, {
+        width: "8px", height: "8px", borderRadius: "50%", flexShrink: "0",
+        background: `rgb(${r},${g},${b})`,
+        boxShadow: `0 0 6px rgba(${r},${g},${b},0.6)`,
+      });
+      dot.createEl("span", { text: `cluster ${ci + 1}` });
+    });
+
     this.initLayout();
     this.startSim();
   }
@@ -204,11 +259,12 @@ export class SemanticGraphView extends ItemView {
     }
 
     this.nodes = capped.map(([path], i) => {
+      const parts = path.split("/");
+      const label = parts.pop()?.replace(".md", "") ?? path;
+      const folder = parts.join("/") || "/";
       const deg = degreeMap.get(i) ?? 0;
       return {
-        id: path,
-        label: path.split("/").pop()?.replace(".md", "") ?? path,
-        cluster: clusters[i],
+        id: path, label, folder, cluster: clusters[i],
         x: 0, y: 0, vx: 0, vy: 0,
         degree: deg,
         r: Math.max(3.5, Math.min(8, 3.5 + Math.log1p(deg) * 0.9)),
@@ -220,20 +276,20 @@ export class SemanticGraphView extends ItemView {
     const cx = this.W / 2, cy = this.H / 2;
     const r = Math.min(this.W, this.H) * 0.36;
     const k = this.settings.clusterCount;
-    // Cluster centroids spread in a ring
     const centroids = Array.from({ length: k }, (_, i) => ({
       x: cx + r * 0.55 * Math.cos((2 * Math.PI * i) / k),
       y: cy + r * 0.55 * Math.sin((2 * Math.PI * i) / k),
     }));
     this.nodes.forEach((n) => {
       const c = centroids[n.cluster % k];
-      n.x = c.x + (Math.random() - 0.5) * 120;
-      n.y = c.y + (Math.random() - 0.5) * 120;
+      n.x = c.x + (Math.random() - 0.5) * 100;
+      n.y = c.y + (Math.random() - 0.5) * 100;
       n.vx = 0; n.vy = 0;
     });
     this.tx = 0; this.ty = 0; this.scale = 1;
   }
 
+  // ── Force simulation ───────────────────────────────────────────────────
   private startSim() {
     this.stopSim();
     this.alpha = 1.0;
@@ -245,20 +301,21 @@ export class SemanticGraphView extends ItemView {
       if (this.alpha < 0.002) {
         if (this.statusEl) this.statusEl.textContent =
           `${this.nodes.length} notes · ${this.edges.length} connections · ${this.settings.clusterCount} clusters`;
+        this.fitToView(true);  // auto-fit when layout settles
         this.draw();
         return;
       }
       this.alpha *= (1 - alphaDecay);
-      if (this.statusEl) this.statusEl.textContent = `Laying out… α=${this.alpha.toFixed(3)}`;
+      if (this.statusEl) this.statusEl.textContent =
+        `Laying out… (${this.nodes.length} notes)`;
 
-      // Repulsion (sampled)
+      // Repulsion
       const step = Math.max(1, Math.floor(this.nodes.length / 300));
       for (let i = 0; i < this.nodes.length; i++) {
         for (let j = i + step; j < this.nodes.length; j += step) {
           const a = this.nodes[i], b = this.nodes[j];
           const dx = b.x - a.x, dy = b.y - a.y;
-          const d2 = dx * dx + dy * dy + 0.01;
-          const d = Math.sqrt(d2);
+          const d = Math.sqrt(dx * dx + dy * dy) + 0.01;
           const f = (k * k) / d * this.alpha * 1.8;
           const fx = (dx / d) * f, fy = (dy / d) * f;
           a.vx -= fx; a.vy -= fy;
@@ -266,7 +323,7 @@ export class SemanticGraphView extends ItemView {
         }
       }
 
-      // Cluster cohesion — pull same-cluster nodes toward cluster centroid
+      // Cluster cohesion
       const centroids = Array.from({ length: this.settings.clusterCount }, () => ({ x: 0, y: 0, n: 0 }));
       this.nodes.forEach(n => {
         const c = centroids[n.cluster % this.settings.clusterCount];
@@ -275,8 +332,8 @@ export class SemanticGraphView extends ItemView {
       centroids.forEach(c => { if (c.n) { c.x /= c.n; c.y /= c.n; } });
       this.nodes.forEach(n => {
         const c = centroids[n.cluster % this.settings.clusterCount];
-        n.vx += (c.x - n.x) * 0.02 * this.alpha;
-        n.vy += (c.y - n.y) * 0.02 * this.alpha;
+        n.vx += (c.x - n.x) * 0.025 * this.alpha;
+        n.vy += (c.y - n.y) * 0.025 * this.alpha;
       });
 
       // Edge attraction
@@ -294,13 +351,11 @@ export class SemanticGraphView extends ItemView {
       let cx = 0, cy = 0;
       this.nodes.forEach(n => { cx += n.x; cy += n.y; });
       cx /= this.nodes.length; cy /= this.nodes.length;
-      const cx2 = this.W / 2, cy2 = this.H / 2;
       this.nodes.forEach(n => {
-        n.vx += (cx2 - cx) * 0.008;
-        n.vy += (cy2 - cy) * 0.008;
+        n.vx += (this.W / 2 - cx) * 0.008;
+        n.vy += (this.H / 2 - cy) * 0.008;
       });
 
-      // Integrate
       this.nodes.forEach(n => {
         n.vx *= velDecay; n.vy *= velDecay;
         n.x += n.vx; n.y += n.vy;
@@ -318,150 +373,199 @@ export class SemanticGraphView extends ItemView {
     this.alpha = 0;
   }
 
-  private worldToScreen(wx: number, wy: number): [number, number] {
-    return [wx * this.scale + this.tx, wy * this.scale + this.ty];
-  }
-  private screenToWorld(sx: number, sy: number): [number, number] {
-    return [(sx - this.tx) / this.scale, (sy - this.ty) / this.scale];
+  // ── Zoom helpers ───────────────────────────────────────────────────────
+  private zoom(factor: number) {
+    this.zoomAt(this.W / 2, this.H / 2, factor);
   }
 
+  private zoomAt(screenX: number, screenY: number, factor: number) {
+    const ns = Math.max(0.05, Math.min(12, this.scale * factor));
+    this.tx = screenX - (screenX - this.tx) * (ns / this.scale);
+    this.ty = screenY - (screenY - this.ty) * (ns / this.scale);
+    this.scale = ns;
+    this.updateHover();
+    this.draw();
+  }
+
+  /** Fit all nodes into view with padding. animated=true for smooth transition. */
+  fitToView(animated = false) {
+    if (this.nodes.length === 0) return;
+    const PAD = 60;
+    let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
+    this.nodes.forEach(n => {
+      minX = Math.min(minX, n.x - n.r);
+      minY = Math.min(minY, n.y - n.r);
+      maxX = Math.max(maxX, n.x + n.r);
+      maxY = Math.max(maxY, n.y + n.r);
+    });
+    const gW = maxX - minX, gH = maxY - minY;
+    if (gW === 0 || gH === 0) return;
+    const targetScale = Math.min(
+      (this.W - PAD * 2) / gW,
+      (this.H - PAD * 2) / gH,
+      1.5  // don't over-zoom for small graphs
+    );
+    const targetTx = (this.W - gW * targetScale) / 2 - minX * targetScale;
+    const targetTy = (this.H - gH * targetScale) / 2 - minY * targetScale;
+
+    if (!animated) {
+      this.scale = targetScale; this.tx = targetTx; this.ty = targetTy;
+      this.draw();
+      return;
+    }
+
+    // Smooth 400ms ease-out animation
+    const startScale = this.scale, startTx = this.tx, startTy = this.ty;
+    const duration = 400;
+    const start = performance.now();
+    const animate = (now: number) => {
+      const t = Math.min(1, (now - start) / duration);
+      const ease = 1 - Math.pow(1 - t, 3);
+      this.scale = startScale + (targetScale - startScale) * ease;
+      this.tx = startTx + (targetTx - startTx) * ease;
+      this.ty = startTy + (targetTy - startTy) * ease;
+      this.draw();
+      if (t < 1) requestAnimationFrame(animate);
+    };
+    requestAnimationFrame(animate);
+  }
+
+  reLayout() { this.initLayout(); this.startSim(); }
+
+  // ── Hover ──────────────────────────────────────────────────────────────
   private updateHover() {
     if (!this.canvas) return;
-    const [wx, wy] = this.screenToWorld(this.mouseX, this.mouseY);
+    // Convert screen → world
+    const wx = (this.mouseX - this.tx) / this.scale;
+    const wy = (this.mouseY - this.ty) / this.scale;
+
     let best = -1, bestD = Infinity;
     this.nodes.forEach((n, i) => {
       const dx = n.x - wx, dy = n.y - wy;
       const d = Math.sqrt(dx * dx + dy * dy);
-      const threshold = (n.r + 6) / this.scale;
-      if (d < threshold && d < bestD) { best = i; bestD = d; }
+      const hit = (n.r + 8) / this.scale;
+      if (d < hit && d < bestD) { best = i; bestD = d; }
     });
+
     if (best !== this.hoveredIdx) {
       this.hoveredIdx = best;
-      this.canvas.style.cursor = best >= 0 ? "pointer" : (this.dragging ? "grabbing" : "crosshair");
+      this.canvas.style.cursor = best >= 0 ? "pointer" : (this.dragging ? "grabbing" : "default");
     }
+
+    // Tooltip
+    if (this.tooltipEl) {
+      if (best >= 0) {
+        const n = this.nodes[best];
+        const [cr, cg, cb] = CLUSTER_COLORS[n.cluster % CLUSTER_COLORS.length];
+        this.tooltipEl.innerHTML =
+          `<div style="font-weight:600;color:#f0f0f0;margin-bottom:3px">${n.label}</div>` +
+          `<div style="color:#666;font-size:10px;margin-bottom:4px">${n.folder}</div>` +
+          `<div style="display:flex;gap:10px;font-size:10px;color:#888">` +
+          `<span style="color:rgb(${cr},${cg},${cb})">● cluster ${n.cluster + 1}</span>` +
+          `<span>${n.degree} connections</span></div>`;
+        // Position: follow cursor with smart edge avoidance
+        const TW = 200, TH = 72;
+        let lx = this.mouseX + 14, ly = this.mouseY - 10;
+        if (lx + TW > this.W - 10) lx = this.mouseX - TW - 14;
+        if (ly + TH > this.H - 10) ly = this.mouseY - TH - 10;
+        if (ly < 10) ly = 10;
+        this.tooltipEl.style.left = lx + "px";
+        this.tooltipEl.style.top = ly + "px";
+        this.tooltipEl.style.display = "block";
+      } else {
+        this.tooltipEl.style.display = "none";
+      }
+    }
+
+    // Only redraw if hover changed
+    if (best !== this.hoveredIdx) this.draw();
   }
 
+  // ── Draw ───────────────────────────────────────────────────────────────
   private draw() {
     const ctx = this.ctx;
     if (!ctx || !this.canvas) return;
-    const W = this.W, H = this.H;
 
-    ctx.clearRect(0, 0, W, H);
+    ctx.clearRect(0, 0, this.W, this.H);
     ctx.fillStyle = "#0d0d0d";
-    ctx.fillRect(0, 0, W, H);
+    ctx.fillRect(0, 0, this.W, this.H);
 
     ctx.save();
     ctx.translate(this.tx, this.ty);
     ctx.scale(this.scale, this.scale);
 
     const t = this.settings.similarityThreshold;
-    const hovered = this.hoveredIdx >= 0 ? this.nodes[this.hoveredIdx] : null;
+    const hi = this.hoveredIdx;
+    const connSet = new Set<number>();
+    if (hi >= 0) this.edges.forEach(e => {
+      if (e.si === hi) connSet.add(e.ti);
+      else if (e.ti === hi) connSet.add(e.si);
+    });
 
-    // Find connected nodes if hovered
-    const connectedSet = new Set<number>();
-    if (hovered) {
-      this.edges.forEach(e => {
-        if (e.si === this.hoveredIdx) connectedSet.add(e.ti);
-        else if (e.ti === this.hoveredIdx) connectedSet.add(e.si);
-      });
-    }
-
-    // Draw edges
+    // ── Edges ──
     this.edges.forEach(e => {
       const a = this.nodes[e.si], b = this.nodes[e.ti];
-      const isHighlighted = hovered && (e.si === this.hoveredIdx || e.ti === this.hoveredIdx);
-      const baseAlpha = 0.15 + (e.weight - t) * 0.5;
+      const isHi = hi >= 0 && (e.si === hi || e.ti === hi);
       ctx.beginPath();
       ctx.moveTo(a.x, a.y);
       ctx.lineTo(b.x, b.y);
-      if (isHighlighted) {
-        const [r, g, b2] = CLUSTER_COLORS[this.nodes[this.hoveredIdx].cluster % CLUSTER_COLORS.length];
-        ctx.strokeStyle = `rgba(${r},${g},${b2},0.85)`;
+      if (isHi) {
+        const [r, g, bl] = CLUSTER_COLORS[this.nodes[hi].cluster % CLUSTER_COLORS.length];
+        ctx.strokeStyle = `rgba(${r},${g},${bl},0.85)`;
         ctx.lineWidth = 1.2;
+      } else if (hi >= 0) {
+        ctx.strokeStyle = "rgba(255,255,255,0.03)";
+        ctx.lineWidth = 0.3;
       } else {
-        ctx.strokeStyle = `rgba(200,200,200,${baseAlpha})`;
+        const a2 = 0.12 + (e.weight - t) * 0.5;
+        ctx.strokeStyle = `rgba(200,200,200,${a2})`;
         ctx.lineWidth = 0.5 + (e.weight - t) * 0.8;
       }
       ctx.stroke();
     });
 
-    // Draw nodes
+    // ── Nodes ──
     this.nodes.forEach((n, i) => {
       const [cr, cg, cb] = CLUSTER_COLORS[n.cluster % CLUSTER_COLORS.length];
-      const isHov = i === this.hoveredIdx;
-      const isConnected = hovered && !isHov && connectedSet.has(i);
-      const isDimmed = hovered && !isHov && !isConnected;
+      const isHov = i === hi;
+      const isConn = hi >= 0 && !isHov && connSet.has(i);
+      const isDim = hi >= 0 && !isHov && !isConn;
 
-      const alpha = isDimmed ? 0.2 : 1.0;
-      const r = isHov ? n.r * 2.5 : n.r;
+      const r = isHov ? n.r * 2.2 : n.r;
 
-      // Outer glow (large, soft halo)
-      if (!isDimmed) {
-        const glowR = r * 6;
-        const grad = ctx.createRadialGradient(n.x, n.y, 0, n.x, n.y, glowR);
-        grad.addColorStop(0, `rgba(${cr},${cg},${cb},${isHov ? 0.35 : 0.18})`);
-        grad.addColorStop(0.4, `rgba(${cr},${cg},${cb},${isHov ? 0.12 : 0.06})`);
-        grad.addColorStop(1, "rgba(0,0,0,0)");
-        ctx.beginPath();
-        ctx.arc(n.x, n.y, glowR, 0, Math.PI * 2);
-        ctx.fillStyle = grad;
-        ctx.fill();
-      }
+      if (!isDim) {
+        // Outer glow
+        const og = ctx.createRadialGradient(n.x, n.y, 0, n.x, n.y, r * 6);
+        og.addColorStop(0, `rgba(${cr},${cg},${cb},${isHov ? 0.3 : 0.15})`);
+        og.addColorStop(0.5, `rgba(${cr},${cg},${cb},${isHov ? 0.1 : 0.05})`);
+        og.addColorStop(1, "rgba(0,0,0,0)");
+        ctx.beginPath(); ctx.arc(n.x, n.y, r * 6, 0, Math.PI * 2);
+        ctx.fillStyle = og; ctx.fill();
 
-      // Inner bloom
-      if (!isDimmed) {
-        const bloomR = r * 2.8;
-        const ig = ctx.createRadialGradient(n.x, n.y, 0, n.x, n.y, bloomR);
-        ig.addColorStop(0, `rgba(${cr},${cg},${cb},${isHov ? 0.85 : 0.6})`);
+        // Inner bloom
+        const ig = ctx.createRadialGradient(n.x, n.y, 0, n.x, n.y, r * 2.5);
+        ig.addColorStop(0, `rgba(${cr},${cg},${cb},${isHov ? 0.8 : 0.55})`);
         ig.addColorStop(1, "rgba(0,0,0,0)");
-        ctx.beginPath();
-        ctx.arc(n.x, n.y, bloomR, 0, Math.PI * 2);
-        ctx.fillStyle = ig;
-        ctx.fill();
+        ctx.beginPath(); ctx.arc(n.x, n.y, r * 2.5, 0, Math.PI * 2);
+        ctx.fillStyle = ig; ctx.fill();
       }
 
-      // Core dot — always solid
-      ctx.beginPath();
-      ctx.arc(n.x, n.y, r, 0, Math.PI * 2);
-      ctx.fillStyle = isDimmed
-        ? `rgba(${cr},${cg},${cb},0.25)`
+      // Core
+      ctx.beginPath(); ctx.arc(n.x, n.y, r, 0, Math.PI * 2);
+      ctx.fillStyle = isDim
+        ? `rgba(${cr},${cg},${cb},0.18)`
         : `rgb(${cr},${cg},${cb})`;
       ctx.fill();
 
-      // Specular highlight
-      if (!isDimmed) {
+      // Specular
+      if (!isDim) {
         ctx.beginPath();
         ctx.arc(n.x - r * 0.25, n.y - r * 0.25, r * 0.5, 0, Math.PI * 2);
-        ctx.fillStyle = `rgba(255,255,255,${isHov ? 0.95 : 0.7})`;
+        ctx.fillStyle = `rgba(255,255,255,${isHov ? 0.9 : 0.65})`;
         ctx.fill();
-      }
-
-      // Label on hover or connected
-      if (isHov || isConnected) {
-        const fontSize = Math.max(10, 11 / this.scale);
-        ctx.font = `${fontSize}px -apple-system, sans-serif`;
-        const lbl = n.label.length > 32 ? n.label.slice(0, 32) + "…" : n.label;
-        const tw = ctx.measureText(lbl).width;
-        const lx = n.x + r + 5, ly = n.y + fontSize * 0.35;
-
-        // Label bg
-        ctx.fillStyle = "rgba(8,8,8,0.75)";
-        ctx.fillRect(lx - 2, ly - fontSize * 0.85, tw + 6, fontSize + 3);
-
-        ctx.fillStyle = isHov
-          ? `rgb(${cr},${cg},${cb})`
-          : `rgba(${cr},${cg},${cb},0.7)`;
-        ctx.fillText(lbl, lx, ly);
       }
     });
 
     ctx.restore();
-  }
-
-  private resetView() { this.tx = 0; this.ty = 0; this.scale = 1; this.draw(); }
-
-  reLayout() {
-    this.initLayout();
-    this.startSim();
   }
 }
