@@ -161,11 +161,9 @@ class SemanticGraphSettingTab extends PluginSettingTab {
     const { containerEl } = this;
     containerEl.empty();
 
-    new Setting(containerEl).setName("Settings").setHeading();
-
     new Setting(containerEl)
       .setName("Embedding endpoint")
-      .setDesc("OpenAI-compatible /v1/embeddings URL (local or cloud).")
+      .setDesc("Embedding API endpoint (OpenAI-compatible /v1/embeddings).")
       .addText((text) =>
         text
           .setPlaceholder("https://api.openai.com/v1/embeddings")
@@ -178,10 +176,10 @@ class SemanticGraphSettingTab extends PluginSettingTab {
 
     new Setting(containerEl)
       .setName("API key")
-      .setDesc("Optional — leave blank for local endpoints without auth.")
+      .setDesc("Leave blank for local endpoints that do not require auth.")
       .addText((text) =>
         text
-          .setPlaceholder("sk-...")
+          .setPlaceholder("Paste your API key here")
           .setValue(this.plugin.settings.apiKey)
           .onChange(async (value) => {
             this.plugin.settings.apiKey = value;
@@ -191,10 +189,10 @@ class SemanticGraphSettingTab extends PluginSettingTab {
 
     new Setting(containerEl)
       .setName("Model")
-      .setDesc("Embedding model name sent to the API.")
+      .setDesc("Embedding model name to send to the API.")
       .addText((text) =>
         text
-          .setPlaceholder("text-embedding-3-small")
+          .setPlaceholder("Model name, e.g. text-embedding-3-small")
           .setValue(this.plugin.settings.model)
           .onChange(async (value) => {
             this.plugin.settings.model = value;
