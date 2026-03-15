@@ -254,11 +254,17 @@ class SemanticGraphSettingTab extends PluginSettingTab {
       .addButton((btn) =>
         btn.setButtonText("Test").onClick(async () => {
           try {
-            const res = await fetch(
-              this.plugin.settings.embeddingEndpoint.replace("/v1/embeddings", "/health")
-            );
+            const headers: Record<string, string> = { "Content-Type": "application/json" };
+            if (this.plugin.settings.apiKey) headers["Authorization"] = `Bearer ${this.plugin.settings.apiKey}`;
+            const res = await fetch(this.plugin.settings.embeddingEndpoint, {
+              method: "POST",
+              headers,
+              body: JSON.stringify({ input: "connection test", model: this.plugin.settings.model }),
+            });
             const data = await res.json();
-            new Notice(`✓ Connected: ${JSON.stringify(data)}`);
+            const dims = data?.data?.[0]?.embedding?.length;
+            if (dims) new Notice(`✓ Connected — ${dims}-dim embedding received`);
+            else new Notice(`✗ Unexpected response: ${JSON.stringify(data).slice(0, 120)}`);
           } catch (e) {
             new Notice(`✗ Connection failed: ${e}`);
           }
