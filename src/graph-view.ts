@@ -47,6 +47,10 @@ export class SemanticGraphView extends ItemView {
   private dragMoved = false;
   private dragStart = { x: 0, y: 0, tx: 0, ty: 0 };
 
+  // Marquee zoom (Shift+drag)
+  private marquee: { x0: number; y0: number; x1: number; y1: number } | null = null;
+  private marqueeActive = false;
+
   // Canvas
   private canvas: HTMLCanvasElement | null = null;
   private ctx: CanvasRenderingContext2D | null = null;
@@ -178,34 +182,63 @@ export class SemanticGraphView extends ItemView {
 
     canvas.addEventListener("mousedown", (e) => {
       if (e.button !== 0) return;
-      this.dragging = true; this.dragMoved = false;
-      this.dragStart = { x: e.clientX, y: e.clientY, tx: this.tx, ty: this.ty };
-      canvas.style.cursor = "grabbing";
+      const r = canvas.getBoundingClientRect();
+      const cx = e.clientX - r.left, cy = e.clientY - r.top;
+      this.dragMoved = false;
+
+      if (e.shiftKey) {
+        // Marquee zoom mode
+        this.marqueeActive = true;
+        this.marquee = { x0: cx, y0: cy, x1: cx, y1: cy };
+        canvas.style.cursor = "crosshair";
+      } else {
+        // Pan mode
+        this.dragging = true;
+        this.dragStart = { x: e.clientX, y: e.clientY, tx: this.tx, ty: this.ty };
+        canvas.style.cursor = "grabbing";
+      }
     });
 
     const onMove = (e: MouseEvent) => {
       const r = canvas.getBoundingClientRect();
       this.mouseX = e.clientX - r.left;
       this.mouseY = e.clientY - r.top;
+
+      if (this.marqueeActive && this.marquee) {
+        this.marquee.x1 = this.mouseX;
+        this.marquee.y1 = this.mouseY;
+        this.dragMoved = true;
+        this.draw(); // redraw with marquee overlay
+        return;
+      }
+
       if (this.dragging) {
         const dx = e.clientX - this.dragStart.x, dy = e.clientY - this.dragStart.y;
         if (Math.abs(dx) + Math.abs(dy) > 3) this.dragMoved = true;
         this.tx = this.dragStart.tx + dx;
         this.ty = this.dragStart.ty + dy;
+        this.draw(); // ← was missing: redraw on pan
       }
+
       this.updateHover();
     };
 
     window.addEventListener("mousemove", onMove);
-    window.addEventListener("mouseup", () => {
+    window.addEventListener("mouseup", (e) => {
+      if (this.marqueeActive && this.marquee && this.dragMoved) {
+        this.zoomToMarquee(this.marquee);
+      }
+      this.marqueeActive = false;
+      this.marquee = null;
       this.dragging = false;
       if (this.canvas) this.canvas.style.cursor = this.hoveredIdx >= 0 ? "pointer" : "default";
+      this.draw();
     });
 
-    canvas.addEventListener("dblclick", () => this.fitToView());
+    canvas.addEventListener("dblclick", () => this.fitToView(true));
 
     canvas.addEventListener("click", () => {
-      if (this.dragMoved) return; // was a pan, not a click
+      if (this.dragMoved) return;
       if (this.hoveredIdx >= 0) {
         const n = this.nodes[this.hoveredIdx];
         const file = this.app.vault.getAbstractFileByPath(n.id);
@@ -432,6 +465,39 @@ export class SemanticGraphView extends ItemView {
 
   reLayout() { this.initLayout(); this.startSim(); }
 
+  private zoomToMarquee(m: { x0: number; y0: number; x1: number; y1: number }) {
+    const sx = Math.min(m.x0, m.x1), sy = Math.min(m.y0, m.y1);
+    const ex = Math.max(m.x0, m.x1), ey = Math.max(m.y0, m.y1);
+    const sw = ex - sx, sh = ey - sy;
+    if (sw < 10 || sh < 10) return; // too small
+    // Convert screen rect to world rect
+    const wx0 = (sx - this.tx) / this.scale, wy0 = (sy - this.ty) / this.scale;
+    const wx1 = (ex - this.tx) / this.scale, wy1 = (ey - this.ty) / this.scale;
+    const gW = wx1 - wx0, gH = wy1 - wy0;
+    const PAD = 20;
+    const targetScale = Math.min(
+      (this.W - PAD * 2) / gW,
+      (this.H - PAD * 2) / gH,
+      12
+    );
+    const targetTx = (this.W - gW * targetScale) / 2 - wx0 * targetScale;
+    const targetTy = (this.H - gH * targetScale) / 2 - wy0 * targetScale;
+
+    // Animate
+    const startScale = this.scale, startTx = this.tx, startTy = this.ty;
+    const start = performance.now();
+    const animate = (now: number) => {
+      const t = Math.min(1, (now - start) / 350);
+      const ease = 1 - Math.pow(1 - t, 3);
+      this.scale = startScale + (targetScale - startScale) * ease;
+      this.tx = startTx + (targetTx - startTx) * ease;
+      this.ty = startTy + (targetTy - startTy) * ease;
+      this.draw();
+      if (t < 1) requestAnimationFrame(animate);
+    };
+    requestAnimationFrame(animate);
+  }
+
   // ── Hover ──────────────────────────────────────────────────────────────
   private updateHover() {
     if (!this.canvas) return;
@@ -567,5 +633,20 @@ export class SemanticGraphView extends ItemView {
     });
 
     ctx.restore();
+
+    // Marquee overlay (drawn in screen space, after restore)
+    if (this.marqueeActive && this.marquee) {
+      const { x0, y0, x1, y1 } = this.marquee;
+      const rx = Math.min(x0, x1), ry = Math.min(y0, y1);
+      const rw = Math.abs(x1 - x0), rh = Math.abs(y1 - y0);
+      ctx.save();
+      ctx.strokeStyle = "rgba(118, 185, 0, 0.9)";
+      ctx.lineWidth = 1.5;
+      ctx.setLineDash([4, 3]);
+      ctx.strokeRect(rx, ry, rw, rh);
+      ctx.fillStyle = "rgba(118, 185, 0, 0.07)";
+      ctx.fillRect(rx, ry, rw, rh);
+      ctx.restore();
+    }
   }
 }
