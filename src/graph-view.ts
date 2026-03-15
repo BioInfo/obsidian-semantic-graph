@@ -11,236 +11,406 @@ const CLUSTER_COLORS = [
   "#f72585", "#b5e48c",
 ];
 
-interface GraphNode {
-  id: string;       // note path
-  label: string;    // note basename
-  cluster: number;
-  x?: number;
-  y?: number;
-  vx?: number;
-  vy?: number;
+interface Node {
+  id: string; label: string; cluster: number;
+  x: number; y: number; vx: number; vy: number;
+  degree: number;
 }
+interface Edge { source: string; target: string; weight: number; }
 
-interface GraphEdge {
-  source: string;
-  target: string;
-  weight: number;
+// Filter garbage filenames: Exchange IDs, UUID-like, very long base64 tokens
+function isJunkFilename(name: string): boolean {
+  if (name.length > 60) return true;
+  // Exchange items: start with AAMk, AAQAA, etc.
+  if (/^AA[A-Z]{2,4}[A-Za-z0-9+/]{20,}/.test(name)) return true;
+  // Pure hex/base64 strings with no spaces or readable words
+  if (name.length > 30 && /^[A-Za-z0-9_\-+=]{30,}$/.test(name) && !/\s/.test(name)) return true;
+  return false;
 }
 
 export class SemanticGraphView extends ItemView {
   private store: IndexStore;
-  private settings: SemanticGraphSettings;
-  private svg: SVGSVGElement | null = null;
+  settings: SemanticGraphSettings;
 
-  constructor(
-    leaf: WorkspaceLeaf,
-    store: IndexStore,
-    settings: SemanticGraphSettings
-  ) {
-    super(leaf);
-    this.store = store;
-    this.settings = settings;
+  // Simulation state
+  private nodes: Node[] = [];
+  private edges: Edge[] = [];
+  private rafId: number | null = null;
+  private simRunning = false;
+  private alpha = 1.0;
+
+  // Pan/zoom
+  private tx = 0; private ty = 0; private scale = 1;
+  private dragging = false;
+  private dragStart = { x: 0, y: 0, tx: 0, ty: 0 };
+
+  // SVG elements
+  private svgEl: SVGSVGElement | null = null;
+  private gMain: SVGGElement | null = null;
+  private gEdges: SVGGElement | null = null;
+  private gNodes: SVGGElement | null = null;
+  private statusEl: HTMLElement | null = null;
+
+  constructor(leaf: WorkspaceLeaf, store: IndexStore, settings: SemanticGraphSettings) {
+    super(leaf); this.store = store; this.settings = settings;
   }
 
-  getViewType(): string { return SEMANTIC_GRAPH_VIEW; }
-  getDisplayText(): string { return "Semantic Graph"; }
-  getIcon(): string { return "git-fork"; }
+  getViewType() { return SEMANTIC_GRAPH_VIEW; }
+  getDisplayText() { return "Semantic Graph"; }
+  getIcon() { return "git-fork"; }
 
-  async onOpen() {
-    this.render();
-  }
+  async onOpen() { this.render(); }
+  async onClose() { this.stopSim(); }
 
-  async onClose() {}
-
-  updateSettings(settings: SemanticGraphSettings) {
-    this.settings = settings;
-    this.render();
-  }
+  updateSettings(s: SemanticGraphSettings) { this.settings = s; }
 
   render() {
+    this.stopSim();
     const container = this.containerEl.children[1] as HTMLElement;
     container.empty();
-    container.style.background = "#0d0d0d";
-    container.style.position = "relative";
+    Object.assign(container.style, {
+      background: "#0d0d0d", position: "relative",
+      overflow: "hidden", userSelect: "none",
+    });
 
-    const entries = this.store.entries();
+    const entries = this.store.entries().filter(([p]) => {
+      const base = p.split("/").pop()?.replace(".md", "") ?? "";
+      return !isJunkFilename(base);
+    });
+
     if (entries.length === 0) {
-      container.createEl("div", {
-        text: "No notes indexed yet. Run 'Semantic Graph: Index vault' from the command palette.",
-        cls: "semantic-graph-empty",
-      });
-      container.style.display = "flex";
-      container.style.alignItems = "center";
-      container.style.justifyContent = "center";
-      container.style.color = "#888";
-      container.style.padding = "2rem";
+      const msg = container.createEl("div", { text: "No notes indexed yet. Run 'Semantic Graph: Index vault' from the command palette." });
+      Object.assign(msg.style, { color: "#666", margin: "auto", padding: "2rem", textAlign: "center", marginTop: "40vh" });
       return;
     }
 
-    const { nodes, edges } = this.buildGraph(entries);
-
     // Status bar
-    const status = container.createEl("div");
-    status.style.cssText = "position:absolute;top:8px;left:12px;font-size:11px;color:#888;z-index:10;pointer-events:none;";
-    status.textContent = `${nodes.length} notes · ${edges.length} connections · ${this.settings.clusterCount} clusters`;
+    this.statusEl = container.createEl("div");
+    Object.assign(this.statusEl.style, {
+      position: "absolute", top: "10px", left: "14px",
+      fontSize: "11px", color: "#555", zIndex: "10", pointerEvents: "none",
+    });
 
-    // SVG canvas
+    // Controls
+    const controls = container.createEl("div");
+    Object.assign(controls.style, {
+      position: "absolute", top: "8px", right: "12px",
+      zIndex: "10", display: "flex", gap: "6px",
+    });
+    const btnStyle = "background:#1a1a1a;border:1px solid #333;color:#888;padding:3px 8px;border-radius:4px;cursor:pointer;font-size:11px;";
+    const resetBtn = controls.createEl("button", { text: "Reset view" });
+    resetBtn.style.cssText = btnStyle;
+    resetBtn.addEventListener("click", () => this.resetView());
+    const rerunBtn = controls.createEl("button", { text: "Re-layout" });
+    rerunBtn.style.cssText = btnStyle;
+    rerunBtn.addEventListener("click", () => this.reLayout());
+
+    // SVG
     const svgEl = document.createElementNS("http://www.w3.org/2000/svg", "svg");
-    svgEl.style.cssText = "width:100%;height:100%;display:block;";
+    svgEl.style.cssText = "width:100%;height:100%;display:block;cursor:grab;";
     container.appendChild(svgEl);
-    this.svg = svgEl;
+    this.svgEl = svgEl;
 
-    // Simple force-directed layout (pure TS, no D3 dependency at runtime)
-    this.runForceLayout(nodes, edges, svgEl, container);
+    // Defs: glow filter
+    const defs = document.createElementNS("http://www.w3.org/2000/svg", "defs");
+    defs.innerHTML = `
+      <filter id="glow" x="-50%" y="-50%" width="200%" height="200%">
+        <feGaussianBlur in="SourceGraphic" stdDeviation="3" result="blur"/>
+        <feMerge><feMergeNode in="blur"/><feMergeNode in="SourceGraphic"/></feMerge>
+      </filter>`;
+    svgEl.appendChild(defs);
+
+    // Main transform group
+    this.gMain = document.createElementNS("http://www.w3.org/2000/svg", "g");
+    svgEl.appendChild(this.gMain);
+    this.gEdges = document.createElementNS("http://www.w3.org/2000/svg", "g");
+    this.gNodes = document.createElementNS("http://www.w3.org/2000/svg", "g");
+    this.gMain.appendChild(this.gEdges);
+    this.gMain.appendChild(this.gNodes);
+
+    // Pan/zoom events
+    svgEl.addEventListener("wheel", (e) => {
+      e.preventDefault();
+      const rect = svgEl.getBoundingClientRect();
+      const mx = e.clientX - rect.left, my = e.clientY - rect.top;
+      const delta = e.deltaY > 0 ? 0.85 : 1.18;
+      const newScale = Math.max(0.05, Math.min(8, this.scale * delta));
+      this.tx = mx - (mx - this.tx) * (newScale / this.scale);
+      this.ty = my - (my - this.ty) * (newScale / this.scale);
+      this.scale = newScale;
+      this.applyTransform();
+    }, { passive: false });
+
+    svgEl.addEventListener("mousedown", (e) => {
+      if (e.button !== 0) return;
+      this.dragging = true;
+      this.dragStart = { x: e.clientX, y: e.clientY, tx: this.tx, ty: this.ty };
+      svgEl.style.cursor = "grabbing";
+    });
+    window.addEventListener("mousemove", (e) => {
+      if (!this.dragging) return;
+      this.tx = this.dragStart.tx + (e.clientX - this.dragStart.x);
+      this.ty = this.dragStart.ty + (e.clientY - this.dragStart.y);
+      this.applyTransform();
+    });
+    window.addEventListener("mouseup", () => {
+      this.dragging = false;
+      if (this.svgEl) this.svgEl.style.cursor = "grab";
+    });
+
+    // Build graph data
+    this.buildGraph(entries);
+    this.initLayout(container.clientWidth || 900, container.clientHeight || 700);
+    this.buildDOM();
+    this.startSim();
   }
 
   private buildGraph(entries: [string, { vector: number[]; indexedAt: number }][]) {
     const capped = entries.slice(0, this.settings.maxNotes);
     const paths = capped.map(([p]) => p);
     const vectors = capped.map(([, e]) => e.vector);
+    const clusters = kMeansClusters(vectors, this.settings.clusterCount);
 
-    const clusterAssignments = kMeansClusters(vectors, this.settings.clusterCount);
-
-    const nodes: GraphNode[] = paths.map((path, i) => ({
-      id: path,
-      label: path.split("/").pop()?.replace(".md", "") ?? path,
-      cluster: clusterAssignments[i],
-    }));
-
-    const edges: GraphEdge[] = [];
-    const threshold = this.settings.similarityThreshold;
+    const degreeMap = new Map<string, number>();
+    this.edges = [];
+    const t = this.settings.similarityThreshold;
     for (let i = 0; i < vectors.length; i++) {
       for (let j = i + 1; j < vectors.length; j++) {
         const sim = cosineSimilarity(vectors[i], vectors[j]);
-        if (sim >= threshold) {
-          edges.push({ source: paths[i], target: paths[j], weight: sim });
+        if (sim >= t) {
+          this.edges.push({ source: paths[i], target: paths[j], weight: sim });
+          degreeMap.set(paths[i], (degreeMap.get(paths[i]) ?? 0) + 1);
+          degreeMap.set(paths[j], (degreeMap.get(paths[j]) ?? 0) + 1);
         }
       }
     }
-
-    return { nodes, edges };
+    this.nodes = paths.map((path, i) => ({
+      id: path,
+      label: path.split("/").pop()?.replace(".md", "") ?? path,
+      cluster: clusters[i],
+      x: 0, y: 0, vx: 0, vy: 0,
+      degree: degreeMap.get(path) ?? 0,
+    }));
   }
 
-  private runForceLayout(
-    nodes: GraphNode[],
-    edges: GraphEdge[],
-    svgEl: SVGSVGElement,
-    container: HTMLElement
-  ) {
-    const W = container.clientWidth || 800;
-    const H = container.clientHeight || 600;
+  private initLayout(W: number, H: number) {
     const cx = W / 2, cy = H / 2;
-
-    // Initialize positions in a circle
-    nodes.forEach((n, i) => {
-      const angle = (2 * Math.PI * i) / nodes.length;
-      const r = Math.min(W, H) * 0.35;
-      n.x = cx + r * Math.cos(angle);
-      n.y = cy + r * Math.sin(angle);
+    const r = Math.min(W, H) * 0.38;
+    this.nodes.forEach((n, i) => {
+      const angle = (2 * Math.PI * i) / this.nodes.length;
+      // Spread by cluster to help separation
+      const clusterOffset = (n.cluster / this.settings.clusterCount) * Math.PI * 0.5;
+      n.x = cx + r * Math.cos(angle + clusterOffset) + (Math.random() - 0.5) * 40;
+      n.y = cy + r * Math.sin(angle + clusterOffset) + (Math.random() - 0.5) * 40;
       n.vx = 0; n.vy = 0;
     });
+    // Center transform
+    this.tx = 0; this.ty = 0; this.scale = 1;
+  }
 
-    const nodeMap = new Map(nodes.map(n => [n.id, n]));
-    const edgeSet = new Map<string, number>();
-    edges.forEach(e => {
-      edgeSet.set(`${e.source}||${e.target}`, e.weight);
-    });
+  private buildDOM() {
+    if (!this.gEdges || !this.gNodes) return;
+    this.gEdges.innerHTML = "";
+    this.gNodes.innerHTML = "";
 
-    // Simple force simulation (100 iterations)
-    const k = Math.sqrt((W * H) / nodes.length);
-    for (let iter = 0; iter < 100; iter++) {
-      // Repulsion
-      for (let i = 0; i < nodes.length; i++) {
-        for (let j = i + 1; j < nodes.length; j++) {
-          const dx = nodes[j].x! - nodes[i].x!;
-          const dy = nodes[j].y! - nodes[i].y!;
-          const d = Math.sqrt(dx * dx + dy * dy) + 0.01;
-          const f = (k * k) / d;
-          nodes[i].vx! -= (dx / d) * f;
-          nodes[i].vy! -= (dy / d) * f;
-          nodes[j].vx! += (dx / d) * f;
-          nodes[j].vy! += (dy / d) * f;
-        }
-      }
-      // Attraction along edges
-      edges.forEach(e => {
-        const a = nodeMap.get(e.source)!;
-        const b = nodeMap.get(e.target)!;
-        if (!a || !b) return;
-        const dx = b.x! - a.x!;
-        const dy = b.y! - a.y!;
-        const d = Math.sqrt(dx * dx + dy * dy) + 0.01;
-        const f = (d * d) / k;
-        a.vx! += (dx / d) * f;
-        a.vy! += (dy / d) * f;
-        b.vx! -= (dx / d) * f;
-        b.vy! -= (dy / d) * f;
-      });
-      // Update positions with damping
-      const temp = 1 - iter / 100;
-      nodes.forEach(n => {
-        const mag = Math.sqrt(n.vx! * n.vx! + n.vy! * n.vy!) + 0.01;
-        const step = Math.min(mag, 10 * temp);
-        n.x = Math.max(20, Math.min(W - 20, n.x! + (n.vx! / mag) * step));
-        n.y = Math.max(20, Math.min(H - 20, n.y! + (n.vy! / mag) * step));
-        n.vx = 0; n.vy = 0;
-      });
-    }
+    const nodeMap = new Map(this.nodes.map(n => [n.id, n]));
+    const t = this.settings.similarityThreshold;
 
-    // Render edges
-    const edgeGroup = document.createElementNS("http://www.w3.org/2000/svg", "g");
-    edges.forEach(e => {
-      const a = nodeMap.get(e.source)!;
-      const b = nodeMap.get(e.target)!;
+    // Edges
+    this.edges.forEach(e => {
+      const a = nodeMap.get(e.source), b = nodeMap.get(e.target);
       if (!a || !b) return;
       const line = document.createElementNS("http://www.w3.org/2000/svg", "line");
-      line.setAttribute("x1", String(a.x));
-      line.setAttribute("y1", String(a.y));
-      line.setAttribute("x2", String(b.x));
-      line.setAttribute("y2", String(b.y));
-      line.setAttribute("stroke", "#333");
-      line.setAttribute("stroke-width", String(0.5 + (e.weight - this.settings.similarityThreshold) * 3));
-      line.setAttribute("stroke-opacity", "0.6");
-      edgeGroup.appendChild(line);
+      line.dataset.src = e.source; line.dataset.tgt = e.target;
+      line.setAttribute("stroke", "#1e1e1e");
+      const w = 0.4 + (e.weight - t) * 2;
+      line.setAttribute("stroke-width", String(w));
+      line.setAttribute("stroke-opacity", String(0.3 + (e.weight - t) * 1.5));
+      this.gEdges!.appendChild(line);
     });
-    svgEl.appendChild(edgeGroup);
 
-    // Render nodes
-    const nodeGroup = document.createElementNS("http://www.w3.org/2000/svg", "g");
-    nodes.forEach(n => {
+    // Nodes
+    this.nodes.forEach(n => {
       const g = document.createElementNS("http://www.w3.org/2000/svg", "g");
+      g.dataset.id = n.id;
       g.style.cursor = "pointer";
 
-      const circle = document.createElementNS("http://www.w3.org/2000/svg", "circle");
-      circle.setAttribute("cx", String(n.x));
-      circle.setAttribute("cy", String(n.y));
-      circle.setAttribute("r", "5");
-      circle.setAttribute("fill", CLUSTER_COLORS[n.cluster % CLUSTER_COLORS.length]);
-      circle.setAttribute("opacity", "0.85");
+      const color = CLUSTER_COLORS[n.cluster % CLUSTER_COLORS.length];
+      const baseR = Math.max(3, Math.min(7, 3 + Math.log1p(n.degree) * 0.8));
 
+      const circle = document.createElementNS("http://www.w3.org/2000/svg", "circle");
+      circle.setAttribute("r", String(baseR));
+      circle.setAttribute("fill", color);
+      circle.setAttribute("opacity", "0.8");
+      circle.setAttribute("filter", "url(#glow)");
+
+      // Label — hidden until hover
       const label = document.createElementNS("http://www.w3.org/2000/svg", "text");
-      label.setAttribute("x", String(n.x! + 7));
-      label.setAttribute("y", String(n.y! + 4));
       label.setAttribute("font-size", "9");
-      label.setAttribute("fill", "#aaa");
+      label.setAttribute("fill", "#ccc");
+      label.setAttribute("x", String(baseR + 3));
+      label.setAttribute("y", "3");
       label.setAttribute("pointer-events", "none");
-      label.textContent = n.label.length > 20 ? n.label.slice(0, 20) + "…" : n.label;
+      label.style.display = "none";
+      const ltext = n.label.length > 28 ? n.label.slice(0, 28) + "…" : n.label;
+      label.textContent = ltext;
 
       g.appendChild(circle);
       g.appendChild(label);
 
-      // Click to open note
+      g.addEventListener("mouseenter", () => {
+        circle.setAttribute("r", String(baseR + 3));
+        circle.setAttribute("opacity", "1");
+        label.style.display = "";
+        // Highlight connected edges
+        this.highlightEdges(n.id, true);
+      });
+      g.addEventListener("mouseleave", () => {
+        circle.setAttribute("r", String(baseR));
+        circle.setAttribute("opacity", "0.8");
+        label.style.display = "none";
+        this.highlightEdges(n.id, false);
+      });
       g.addEventListener("click", () => {
         const file = this.app.vault.getAbstractFileByPath(n.id);
         if (file) this.app.workspace.getLeaf().openFile(file as any);
       });
 
-      // Hover highlight
-      g.addEventListener("mouseenter", () => circle.setAttribute("r", "7"));
-      g.addEventListener("mouseleave", () => circle.setAttribute("r", "5"));
-
-      nodeGroup.appendChild(g);
+      this.gNodes!.appendChild(g);
     });
-    svgEl.appendChild(nodeGroup);
+
+    this.updatePositions();
+  }
+
+  private highlightEdges(nodeId: string, on: boolean) {
+    if (!this.gEdges) return;
+    Array.from(this.gEdges.children).forEach(el => {
+      const line = el as SVGLineElement;
+      if (line.dataset.src === nodeId || line.dataset.tgt === nodeId) {
+        line.setAttribute("stroke", on ? "#76b900" : "#1e1e1e");
+        line.setAttribute("stroke-opacity", on ? "0.9" : "0.3");
+      }
+    });
+  }
+
+  private startSim() {
+    this.simRunning = true;
+    this.alpha = 1.0;
+    const nodeMap = new Map(this.nodes.map(n => [n.id, n]));
+    const W = (this.svgEl?.clientWidth ?? 900);
+    const H = (this.svgEl?.clientHeight ?? 700);
+    const k = Math.sqrt((W * H) / Math.max(1, this.nodes.length));
+
+    const tick = () => {
+      if (!this.simRunning || this.alpha < 0.003) {
+        this.simRunning = false;
+        if (this.statusEl) this.statusEl.textContent =
+          `${this.nodes.length} notes · ${this.edges.length} connections · ${this.settings.clusterCount} clusters`;
+        return;
+      }
+
+      const alphaDecay = 0.0228;
+      const velocityDecay = 0.4;
+      this.alpha = this.alpha * (1 - alphaDecay);
+
+      if (this.statusEl) this.statusEl.textContent =
+        `Laying out… α=${this.alpha.toFixed(3)}`;
+
+      // Repulsion (Barnes-Hut approximation skipped for simplicity, sample repulsion)
+      const sampleStep = Math.max(1, Math.floor(this.nodes.length / 200));
+      for (let i = 0; i < this.nodes.length; i++) {
+        for (let j = i + sampleStep; j < this.nodes.length; j += sampleStep) {
+          const ni = this.nodes[i], nj = this.nodes[j];
+          const dx = nj.x - ni.x, dy = nj.y - ni.y;
+          const d = Math.sqrt(dx * dx + dy * dy) + 0.1;
+          const f = (k * k) / d * this.alpha * 2;
+          const fx = (dx / d) * f, fy = (dy / d) * f;
+          ni.vx -= fx; ni.vy -= fy;
+          nj.vx += fx; nj.vy += fy;
+        }
+      }
+
+      // Attraction (edges)
+      this.edges.forEach(e => {
+        const a = nodeMap.get(e.source), b = nodeMap.get(e.target);
+        if (!a || !b) return;
+        const dx = b.x - a.x, dy = b.y - a.y;
+        const d = Math.sqrt(dx * dx + dy * dy) + 0.1;
+        const strength = e.weight * this.alpha;
+        const f = d / k * strength;
+        const fx = (dx / d) * f, fy = (dy / d) * f;
+        a.vx += fx; a.vy += fy;
+        b.vx -= fx; b.vy -= fy;
+      });
+
+      // Centering
+      let cx = 0, cy = 0;
+      this.nodes.forEach(n => { cx += n.x; cy += n.y; });
+      cx /= this.nodes.length; cy /= this.nodes.length;
+      const tcx = W / 2, tcy = H / 2;
+      this.nodes.forEach(n => {
+        n.vx += (tcx - cx) * 0.01;
+        n.vy += (tcy - cy) * 0.01;
+      });
+
+      // Update positions
+      this.nodes.forEach(n => {
+        n.vx *= velocityDecay;
+        n.vy *= velocityDecay;
+        n.x += n.vx;
+        n.y += n.vy;
+      });
+
+      this.updatePositions();
+      this.rafId = requestAnimationFrame(tick);
+    };
+    this.rafId = requestAnimationFrame(tick);
+  }
+
+  private stopSim() {
+    this.simRunning = false;
+    if (this.rafId !== null) { cancelAnimationFrame(this.rafId); this.rafId = null; }
+  }
+
+  private updatePositions() {
+    if (!this.gEdges || !this.gNodes) return;
+    const nodeMap = new Map(this.nodes.map(n => [n.id, n]));
+
+    // Update edges
+    Array.from(this.gEdges.children).forEach(el => {
+      const line = el as SVGLineElement;
+      const a = nodeMap.get(line.dataset.src ?? "");
+      const b = nodeMap.get(line.dataset.tgt ?? "");
+      if (a && b) {
+        line.setAttribute("x1", String(a.x));
+        line.setAttribute("y1", String(a.y));
+        line.setAttribute("x2", String(b.x));
+        line.setAttribute("y2", String(b.y));
+      }
+    });
+
+    // Update nodes
+    Array.from(this.gNodes.children).forEach(el => {
+      const g = el as SVGGElement;
+      const n = nodeMap.get(g.dataset.id ?? "");
+      if (n) g.setAttribute("transform", `translate(${n.x},${n.y})`);
+    });
+  }
+
+  private applyTransform() {
+    if (this.gMain) this.gMain.setAttribute("transform", `translate(${this.tx},${this.ty}) scale(${this.scale})`);
+  }
+
+  private resetView() {
+    this.tx = 0; this.ty = 0; this.scale = 1;
+    this.applyTransform();
+  }
+
+  reLayout() {
+    if (!this.svgEl) return;
+    const W = this.svgEl.clientWidth || 900, H = this.svgEl.clientHeight || 700;
+    this.initLayout(W, H);
+    this.updatePositions();
+    this.startSim();
   }
 }
