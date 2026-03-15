@@ -5,38 +5,41 @@ import { SemanticGraphSettings } from "./settings";
 
 export const SEMANTIC_GRAPH_VIEW = "semantic-graph-view";
 
+// Cluster palette — vibrant but works on dark bg
 const CLUSTER_COLORS = [
-  "#76b900", "#4a9eff", "#ff6b6b", "#ffd93d",
-  "#6bcb77", "#c77dff", "#ff9f43", "#48cae4",
-  "#f72585", "#b5e48c",
-];
+  [118, 185, 0],   // NVIDIA green
+  [74, 158, 255],  // blue
+  [255, 107, 107], // red
+  [255, 217, 61],  // yellow
+  [107, 203, 119], // green
+  [199, 125, 255], // purple
+  [255, 159, 67],  // orange
+  [72, 202, 228],  // cyan
+  [247, 37, 133],  // pink
+  [181, 228, 140], // lime
+] as [number, number, number][];
+
+function isJunkFilename(name: string): boolean {
+  if (name.length > 60) return true;
+  if (/^AA[A-Z]{2,4}[A-Za-z0-9+/]{16,}/.test(name)) return true;
+  if (name.length > 32 && /^[A-Za-z0-9_\-+=]{32,}$/.test(name)) return true;
+  return false;
+}
 
 interface Node {
   id: string; label: string; cluster: number;
   x: number; y: number; vx: number; vy: number;
-  degree: number;
+  degree: number; r: number;
 }
-interface Edge { source: string; target: string; weight: number; }
-
-// Filter garbage filenames: Exchange IDs, UUID-like, very long base64 tokens
-function isJunkFilename(name: string): boolean {
-  if (name.length > 60) return true;
-  // Exchange items: start with AAMk, AAQAA, etc.
-  if (/^AA[A-Z]{2,4}[A-Za-z0-9+/]{20,}/.test(name)) return true;
-  // Pure hex/base64 strings with no spaces or readable words
-  if (name.length > 30 && /^[A-Za-z0-9_\-+=]{30,}$/.test(name) && !/\s/.test(name)) return true;
-  return false;
-}
+interface Edge { si: number; ti: number; weight: number; }
 
 export class SemanticGraphView extends ItemView {
   private store: IndexStore;
   settings: SemanticGraphSettings;
 
-  // Simulation state
   private nodes: Node[] = [];
   private edges: Edge[] = [];
   private rafId: number | null = null;
-  private simRunning = false;
   private alpha = 1.0;
 
   // Pan/zoom
@@ -44,11 +47,16 @@ export class SemanticGraphView extends ItemView {
   private dragging = false;
   private dragStart = { x: 0, y: 0, tx: 0, ty: 0 };
 
-  // SVG elements
-  private svgEl: SVGSVGElement | null = null;
-  private gMain: SVGGElement | null = null;
-  private gEdges: SVGGElement | null = null;
-  private gNodes: SVGGElement | null = null;
+  // Canvas
+  private canvas: HTMLCanvasElement | null = null;
+  private ctx: CanvasRenderingContext2D | null = null;
+  private W = 900; private H = 700;
+
+  // Hover state
+  private hoveredIdx = -1;
+  private mouseX = 0; private mouseY = 0;
+
+  // Status
   private statusEl: HTMLElement | null = null;
 
   constructor(leaf: WorkspaceLeaf, store: IndexStore, settings: SemanticGraphSettings) {
@@ -61,7 +69,6 @@ export class SemanticGraphView extends ItemView {
 
   async onOpen() { this.render(); }
   async onClose() { this.stopSim(); }
-
   updateSettings(s: SemanticGraphSettings) { this.settings = s; }
 
   render() {
@@ -69,8 +76,8 @@ export class SemanticGraphView extends ItemView {
     const container = this.containerEl.children[1] as HTMLElement;
     container.empty();
     Object.assign(container.style, {
-      background: "#0d0d0d", position: "relative",
-      overflow: "hidden", userSelect: "none",
+      background: "#080808", position: "relative",
+      overflow: "hidden", userSelect: "none", fontFamily: "sans-serif",
     });
 
     const entries = this.store.entries().filter(([p]) => {
@@ -80,15 +87,15 @@ export class SemanticGraphView extends ItemView {
 
     if (entries.length === 0) {
       const msg = container.createEl("div", { text: "No notes indexed yet. Run 'Semantic Graph: Index vault' from the command palette." });
-      Object.assign(msg.style, { color: "#666", margin: "auto", padding: "2rem", textAlign: "center", marginTop: "40vh" });
+      Object.assign(msg.style, { color: "#444", textAlign: "center", marginTop: "40vh", padding: "2rem" });
       return;
     }
 
-    // Status bar
+    // Status overlay
     this.statusEl = container.createEl("div");
     Object.assign(this.statusEl.style, {
-      position: "absolute", top: "10px", left: "14px",
-      fontSize: "11px", color: "#555", zIndex: "10", pointerEvents: "none",
+      position: "absolute", top: "12px", left: "16px",
+      fontSize: "11px", color: "#444", zIndex: "10", pointerEvents: "none", letterSpacing: "0.03em",
     });
 
     // Controls
@@ -97,247 +104,183 @@ export class SemanticGraphView extends ItemView {
       position: "absolute", top: "8px", right: "12px",
       zIndex: "10", display: "flex", gap: "6px",
     });
-    const btnStyle = "background:#1a1a1a;border:1px solid #333;color:#888;padding:3px 8px;border-radius:4px;cursor:pointer;font-size:11px;";
-    const resetBtn = controls.createEl("button", { text: "Reset view" });
-    resetBtn.style.cssText = btnStyle;
-    resetBtn.addEventListener("click", () => this.resetView());
-    const rerunBtn = controls.createEl("button", { text: "Re-layout" });
-    rerunBtn.style.cssText = btnStyle;
-    rerunBtn.addEventListener("click", () => this.reLayout());
+    [["Reset", () => this.resetView()], ["Re-layout", () => this.reLayout()]].forEach(([label, fn]) => {
+      const b = controls.createEl("button", { text: label as string });
+      Object.assign(b.style, {
+        background: "rgba(255,255,255,0.04)", border: "1px solid rgba(255,255,255,0.08)",
+        color: "#555", padding: "3px 10px", borderRadius: "4px", cursor: "pointer",
+        fontSize: "11px", letterSpacing: "0.03em",
+      });
+      b.addEventListener("click", fn as () => void);
+    });
 
-    // SVG
-    const svgEl = document.createElementNS("http://www.w3.org/2000/svg", "svg");
-    svgEl.style.cssText = "width:100%;height:100%;display:block;cursor:grab;";
-    container.appendChild(svgEl);
-    this.svgEl = svgEl;
+    // Canvas
+    const canvas = document.createElement("canvas");
+    canvas.style.cssText = "display:block;cursor:crosshair;";
+    container.appendChild(canvas);
+    this.canvas = canvas;
+    this.ctx = canvas.getContext("2d");
 
-    // Defs: glow filter
-    const defs = document.createElementNS("http://www.w3.org/2000/svg", "defs");
-    defs.innerHTML = `
-      <filter id="glow" x="-50%" y="-50%" width="200%" height="200%">
-        <feGaussianBlur in="SourceGraphic" stdDeviation="3" result="blur"/>
-        <feMerge><feMergeNode in="blur"/><feMergeNode in="SourceGraphic"/></feMerge>
-      </filter>`;
-    svgEl.appendChild(defs);
+    // Size canvas
+    const resize = () => {
+      const r = container.getBoundingClientRect();
+      this.W = r.width || 900; this.H = r.height || 700;
+      canvas.width = this.W; canvas.height = this.H;
+      this.draw();
+    };
+    resize();
+    const ro = new ResizeObserver(resize);
+    ro.observe(container);
 
-    // Main transform group
-    this.gMain = document.createElementNS("http://www.w3.org/2000/svg", "g");
-    svgEl.appendChild(this.gMain);
-    this.gEdges = document.createElementNS("http://www.w3.org/2000/svg", "g");
-    this.gNodes = document.createElementNS("http://www.w3.org/2000/svg", "g");
-    this.gMain.appendChild(this.gEdges);
-    this.gMain.appendChild(this.gNodes);
-
-    // Pan/zoom events
-    svgEl.addEventListener("wheel", (e) => {
+    // Pointer events
+    canvas.addEventListener("wheel", (e) => {
       e.preventDefault();
-      const rect = svgEl.getBoundingClientRect();
-      const mx = e.clientX - rect.left, my = e.clientY - rect.top;
-      const delta = e.deltaY > 0 ? 0.85 : 1.18;
-      const newScale = Math.max(0.05, Math.min(8, this.scale * delta));
-      this.tx = mx - (mx - this.tx) * (newScale / this.scale);
-      this.ty = my - (my - this.ty) * (newScale / this.scale);
-      this.scale = newScale;
-      this.applyTransform();
+      const r = canvas.getBoundingClientRect();
+      const mx = e.clientX - r.left, my = e.clientY - r.top;
+      const d = e.deltaY > 0 ? 0.85 : 1.18;
+      const ns = Math.max(0.05, Math.min(10, this.scale * d));
+      this.tx = mx - (mx - this.tx) * (ns / this.scale);
+      this.ty = my - (my - this.ty) * (ns / this.scale);
+      this.scale = ns;
     }, { passive: false });
 
-    svgEl.addEventListener("mousedown", (e) => {
+    canvas.addEventListener("mousedown", (e) => {
       if (e.button !== 0) return;
       this.dragging = true;
       this.dragStart = { x: e.clientX, y: e.clientY, tx: this.tx, ty: this.ty };
-      svgEl.style.cursor = "grabbing";
+      canvas.style.cursor = "grabbing";
     });
-    window.addEventListener("mousemove", (e) => {
-      if (!this.dragging) return;
-      this.tx = this.dragStart.tx + (e.clientX - this.dragStart.x);
-      this.ty = this.dragStart.ty + (e.clientY - this.dragStart.y);
-      this.applyTransform();
-    });
-    window.addEventListener("mouseup", () => {
+    const onMove = (e: MouseEvent) => {
+      const r = canvas.getBoundingClientRect();
+      this.mouseX = e.clientX - r.left;
+      this.mouseY = e.clientY - r.top;
+      if (this.dragging) {
+        this.tx = this.dragStart.tx + (e.clientX - this.dragStart.x);
+        this.ty = this.dragStart.ty + (e.clientY - this.dragStart.y);
+      }
+      this.updateHover();
+    };
+    const onUp = () => {
+      if (this.dragging) canvas.style.cursor = "crosshair";
       this.dragging = false;
-      if (this.svgEl) this.svgEl.style.cursor = "grab";
+    };
+    canvas.addEventListener("mousemove", onMove);
+    window.addEventListener("mouseup", onUp);
+
+    canvas.addEventListener("click", (e) => {
+      if (this.hoveredIdx >= 0) {
+        const n = this.nodes[this.hoveredIdx];
+        const file = this.app.vault.getAbstractFileByPath(n.id);
+        if (file) this.app.workspace.getLeaf().openFile(file as any);
+      }
     });
 
-    // Build graph data
     this.buildGraph(entries);
-    this.initLayout(container.clientWidth || 900, container.clientHeight || 700);
-    this.buildDOM();
+    this.initLayout();
     this.startSim();
   }
 
   private buildGraph(entries: [string, { vector: number[]; indexedAt: number }][]) {
     const capped = entries.slice(0, this.settings.maxNotes);
-    const paths = capped.map(([p]) => p);
     const vectors = capped.map(([, e]) => e.vector);
     const clusters = kMeansClusters(vectors, this.settings.clusterCount);
-
-    const degreeMap = new Map<string, number>();
-    this.edges = [];
     const t = this.settings.similarityThreshold;
+
+    const degreeMap = new Map<number, number>();
+    this.edges = [];
     for (let i = 0; i < vectors.length; i++) {
       for (let j = i + 1; j < vectors.length; j++) {
         const sim = cosineSimilarity(vectors[i], vectors[j]);
         if (sim >= t) {
-          this.edges.push({ source: paths[i], target: paths[j], weight: sim });
-          degreeMap.set(paths[i], (degreeMap.get(paths[i]) ?? 0) + 1);
-          degreeMap.set(paths[j], (degreeMap.get(paths[j]) ?? 0) + 1);
+          this.edges.push({ si: i, ti: j, weight: sim });
+          degreeMap.set(i, (degreeMap.get(i) ?? 0) + 1);
+          degreeMap.set(j, (degreeMap.get(j) ?? 0) + 1);
         }
       }
     }
-    this.nodes = paths.map((path, i) => ({
-      id: path,
-      label: path.split("/").pop()?.replace(".md", "") ?? path,
-      cluster: clusters[i],
-      x: 0, y: 0, vx: 0, vy: 0,
-      degree: degreeMap.get(path) ?? 0,
-    }));
+
+    this.nodes = capped.map(([path], i) => {
+      const deg = degreeMap.get(i) ?? 0;
+      return {
+        id: path,
+        label: path.split("/").pop()?.replace(".md", "") ?? path,
+        cluster: clusters[i],
+        x: 0, y: 0, vx: 0, vy: 0,
+        degree: deg,
+        r: Math.max(2.5, Math.min(6, 2.5 + Math.log1p(deg) * 0.7)),
+      };
+    });
   }
 
-  private initLayout(W: number, H: number) {
-    const cx = W / 2, cy = H / 2;
-    const r = Math.min(W, H) * 0.38;
-    this.nodes.forEach((n, i) => {
-      const angle = (2 * Math.PI * i) / this.nodes.length;
-      // Spread by cluster to help separation
-      const clusterOffset = (n.cluster / this.settings.clusterCount) * Math.PI * 0.5;
-      n.x = cx + r * Math.cos(angle + clusterOffset) + (Math.random() - 0.5) * 40;
-      n.y = cy + r * Math.sin(angle + clusterOffset) + (Math.random() - 0.5) * 40;
+  private initLayout() {
+    const cx = this.W / 2, cy = this.H / 2;
+    const r = Math.min(this.W, this.H) * 0.36;
+    const k = this.settings.clusterCount;
+    // Cluster centroids spread in a ring
+    const centroids = Array.from({ length: k }, (_, i) => ({
+      x: cx + r * 0.55 * Math.cos((2 * Math.PI * i) / k),
+      y: cy + r * 0.55 * Math.sin((2 * Math.PI * i) / k),
+    }));
+    this.nodes.forEach((n) => {
+      const c = centroids[n.cluster % k];
+      n.x = c.x + (Math.random() - 0.5) * 120;
+      n.y = c.y + (Math.random() - 0.5) * 120;
       n.vx = 0; n.vy = 0;
     });
-    // Center transform
     this.tx = 0; this.ty = 0; this.scale = 1;
   }
 
-  private buildDOM() {
-    if (!this.gEdges || !this.gNodes) return;
-    this.gEdges.innerHTML = "";
-    this.gNodes.innerHTML = "";
-
-    const nodeMap = new Map(this.nodes.map(n => [n.id, n]));
-    const t = this.settings.similarityThreshold;
-
-    // Edges
-    this.edges.forEach(e => {
-      const a = nodeMap.get(e.source), b = nodeMap.get(e.target);
-      if (!a || !b) return;
-      const line = document.createElementNS("http://www.w3.org/2000/svg", "line");
-      line.dataset.src = e.source; line.dataset.tgt = e.target;
-      line.setAttribute("stroke", "#1e1e1e");
-      const w = 0.4 + (e.weight - t) * 2;
-      line.setAttribute("stroke-width", String(w));
-      line.setAttribute("stroke-opacity", String(0.3 + (e.weight - t) * 1.5));
-      this.gEdges!.appendChild(line);
-    });
-
-    // Nodes
-    this.nodes.forEach(n => {
-      const g = document.createElementNS("http://www.w3.org/2000/svg", "g");
-      g.dataset.id = n.id;
-      g.style.cursor = "pointer";
-
-      const color = CLUSTER_COLORS[n.cluster % CLUSTER_COLORS.length];
-      const baseR = Math.max(3, Math.min(7, 3 + Math.log1p(n.degree) * 0.8));
-
-      const circle = document.createElementNS("http://www.w3.org/2000/svg", "circle");
-      circle.setAttribute("r", String(baseR));
-      circle.setAttribute("fill", color);
-      circle.setAttribute("opacity", "0.8");
-      circle.setAttribute("filter", "url(#glow)");
-
-      // Label — hidden until hover
-      const label = document.createElementNS("http://www.w3.org/2000/svg", "text");
-      label.setAttribute("font-size", "9");
-      label.setAttribute("fill", "#ccc");
-      label.setAttribute("x", String(baseR + 3));
-      label.setAttribute("y", "3");
-      label.setAttribute("pointer-events", "none");
-      label.style.display = "none";
-      const ltext = n.label.length > 28 ? n.label.slice(0, 28) + "…" : n.label;
-      label.textContent = ltext;
-
-      g.appendChild(circle);
-      g.appendChild(label);
-
-      g.addEventListener("mouseenter", () => {
-        circle.setAttribute("r", String(baseR + 3));
-        circle.setAttribute("opacity", "1");
-        label.style.display = "";
-        // Highlight connected edges
-        this.highlightEdges(n.id, true);
-      });
-      g.addEventListener("mouseleave", () => {
-        circle.setAttribute("r", String(baseR));
-        circle.setAttribute("opacity", "0.8");
-        label.style.display = "none";
-        this.highlightEdges(n.id, false);
-      });
-      g.addEventListener("click", () => {
-        const file = this.app.vault.getAbstractFileByPath(n.id);
-        if (file) this.app.workspace.getLeaf().openFile(file as any);
-      });
-
-      this.gNodes!.appendChild(g);
-    });
-
-    this.updatePositions();
-  }
-
-  private highlightEdges(nodeId: string, on: boolean) {
-    if (!this.gEdges) return;
-    Array.from(this.gEdges.children).forEach(el => {
-      const line = el as SVGLineElement;
-      if (line.dataset.src === nodeId || line.dataset.tgt === nodeId) {
-        line.setAttribute("stroke", on ? "#76b900" : "#1e1e1e");
-        line.setAttribute("stroke-opacity", on ? "0.9" : "0.3");
-      }
-    });
-  }
-
   private startSim() {
-    this.simRunning = true;
+    this.stopSim();
     this.alpha = 1.0;
-    const nodeMap = new Map(this.nodes.map(n => [n.id, n]));
-    const W = (this.svgEl?.clientWidth ?? 900);
-    const H = (this.svgEl?.clientHeight ?? 700);
-    const k = Math.sqrt((W * H) / Math.max(1, this.nodes.length));
+    const alphaDecay = 0.018;
+    const velDecay = 0.35;
+    const k = Math.sqrt((this.W * this.H) / Math.max(1, this.nodes.length)) * 0.9;
 
     const tick = () => {
-      if (!this.simRunning || this.alpha < 0.003) {
-        this.simRunning = false;
+      if (this.alpha < 0.002) {
         if (this.statusEl) this.statusEl.textContent =
           `${this.nodes.length} notes · ${this.edges.length} connections · ${this.settings.clusterCount} clusters`;
+        this.draw();
         return;
       }
+      this.alpha *= (1 - alphaDecay);
+      if (this.statusEl) this.statusEl.textContent = `Laying out… α=${this.alpha.toFixed(3)}`;
 
-      const alphaDecay = 0.0228;
-      const velocityDecay = 0.4;
-      this.alpha = this.alpha * (1 - alphaDecay);
-
-      if (this.statusEl) this.statusEl.textContent =
-        `Laying out… α=${this.alpha.toFixed(3)}`;
-
-      // Repulsion (Barnes-Hut approximation skipped for simplicity, sample repulsion)
-      const sampleStep = Math.max(1, Math.floor(this.nodes.length / 200));
+      // Repulsion (sampled)
+      const step = Math.max(1, Math.floor(this.nodes.length / 300));
       for (let i = 0; i < this.nodes.length; i++) {
-        for (let j = i + sampleStep; j < this.nodes.length; j += sampleStep) {
-          const ni = this.nodes[i], nj = this.nodes[j];
-          const dx = nj.x - ni.x, dy = nj.y - ni.y;
-          const d = Math.sqrt(dx * dx + dy * dy) + 0.1;
-          const f = (k * k) / d * this.alpha * 2;
+        for (let j = i + step; j < this.nodes.length; j += step) {
+          const a = this.nodes[i], b = this.nodes[j];
+          const dx = b.x - a.x, dy = b.y - a.y;
+          const d2 = dx * dx + dy * dy + 0.01;
+          const d = Math.sqrt(d2);
+          const f = (k * k) / d * this.alpha * 1.8;
           const fx = (dx / d) * f, fy = (dy / d) * f;
-          ni.vx -= fx; ni.vy -= fy;
-          nj.vx += fx; nj.vy += fy;
+          a.vx -= fx; a.vy -= fy;
+          b.vx += fx; b.vy += fy;
         }
       }
 
-      // Attraction (edges)
+      // Cluster cohesion — pull same-cluster nodes toward cluster centroid
+      const centroids = Array.from({ length: this.settings.clusterCount }, () => ({ x: 0, y: 0, n: 0 }));
+      this.nodes.forEach(n => {
+        const c = centroids[n.cluster % this.settings.clusterCount];
+        c.x += n.x; c.y += n.y; c.n++;
+      });
+      centroids.forEach(c => { if (c.n) { c.x /= c.n; c.y /= c.n; } });
+      this.nodes.forEach(n => {
+        const c = centroids[n.cluster % this.settings.clusterCount];
+        n.vx += (c.x - n.x) * 0.02 * this.alpha;
+        n.vy += (c.y - n.y) * 0.02 * this.alpha;
+      });
+
+      // Edge attraction
       this.edges.forEach(e => {
-        const a = nodeMap.get(e.source), b = nodeMap.get(e.target);
-        if (!a || !b) return;
+        const a = this.nodes[e.si], b = this.nodes[e.ti];
         const dx = b.x - a.x, dy = b.y - a.y;
-        const d = Math.sqrt(dx * dx + dy * dy) + 0.1;
-        const strength = e.weight * this.alpha;
-        const f = d / k * strength;
+        const d = Math.sqrt(dx * dx + dy * dy) + 0.01;
+        const f = (d / k) * e.weight * this.alpha * 0.6;
         const fx = (dx / d) * f, fy = (dy / d) * f;
         a.vx += fx; a.vy += fy;
         b.vx -= fx; b.vy -= fy;
@@ -347,70 +290,169 @@ export class SemanticGraphView extends ItemView {
       let cx = 0, cy = 0;
       this.nodes.forEach(n => { cx += n.x; cy += n.y; });
       cx /= this.nodes.length; cy /= this.nodes.length;
-      const tcx = W / 2, tcy = H / 2;
+      const cx2 = this.W / 2, cy2 = this.H / 2;
       this.nodes.forEach(n => {
-        n.vx += (tcx - cx) * 0.01;
-        n.vy += (tcy - cy) * 0.01;
+        n.vx += (cx2 - cx) * 0.008;
+        n.vy += (cy2 - cy) * 0.008;
       });
 
-      // Update positions
+      // Integrate
       this.nodes.forEach(n => {
-        n.vx *= velocityDecay;
-        n.vy *= velocityDecay;
-        n.x += n.vx;
-        n.y += n.vy;
+        n.vx *= velDecay; n.vy *= velDecay;
+        n.x += n.vx; n.y += n.vy;
       });
 
-      this.updatePositions();
+      this.updateHover();
+      this.draw();
       this.rafId = requestAnimationFrame(tick);
     };
     this.rafId = requestAnimationFrame(tick);
   }
 
   private stopSim() {
-    this.simRunning = false;
     if (this.rafId !== null) { cancelAnimationFrame(this.rafId); this.rafId = null; }
+    this.alpha = 0;
   }
 
-  private updatePositions() {
-    if (!this.gEdges || !this.gNodes) return;
-    const nodeMap = new Map(this.nodes.map(n => [n.id, n]));
+  private worldToScreen(wx: number, wy: number): [number, number] {
+    return [wx * this.scale + this.tx, wy * this.scale + this.ty];
+  }
+  private screenToWorld(sx: number, sy: number): [number, number] {
+    return [(sx - this.tx) / this.scale, (sy - this.ty) / this.scale];
+  }
 
-    // Update edges
-    Array.from(this.gEdges.children).forEach(el => {
-      const line = el as SVGLineElement;
-      const a = nodeMap.get(line.dataset.src ?? "");
-      const b = nodeMap.get(line.dataset.tgt ?? "");
-      if (a && b) {
-        line.setAttribute("x1", String(a.x));
-        line.setAttribute("y1", String(a.y));
-        line.setAttribute("x2", String(b.x));
-        line.setAttribute("y2", String(b.y));
+  private updateHover() {
+    if (!this.canvas) return;
+    const [wx, wy] = this.screenToWorld(this.mouseX, this.mouseY);
+    let best = -1, bestD = Infinity;
+    this.nodes.forEach((n, i) => {
+      const dx = n.x - wx, dy = n.y - wy;
+      const d = Math.sqrt(dx * dx + dy * dy);
+      const threshold = (n.r + 6) / this.scale;
+      if (d < threshold && d < bestD) { best = i; bestD = d; }
+    });
+    if (best !== this.hoveredIdx) {
+      this.hoveredIdx = best;
+      this.canvas.style.cursor = best >= 0 ? "pointer" : (this.dragging ? "grabbing" : "crosshair");
+    }
+  }
+
+  private draw() {
+    const ctx = this.ctx;
+    if (!ctx || !this.canvas) return;
+    const W = this.W, H = this.H;
+
+    ctx.clearRect(0, 0, W, H);
+    ctx.fillStyle = "#080808";
+    ctx.fillRect(0, 0, W, H);
+
+    ctx.save();
+    ctx.translate(this.tx, this.ty);
+    ctx.scale(this.scale, this.scale);
+
+    const t = this.settings.similarityThreshold;
+    const hovered = this.hoveredIdx >= 0 ? this.nodes[this.hoveredIdx] : null;
+
+    // Find connected nodes if hovered
+    const connectedSet = new Set<number>();
+    if (hovered) {
+      this.edges.forEach(e => {
+        if (e.si === this.hoveredIdx) connectedSet.add(e.ti);
+        else if (e.ti === this.hoveredIdx) connectedSet.add(e.si);
+      });
+    }
+
+    // Draw edges
+    this.edges.forEach(e => {
+      const a = this.nodes[e.si], b = this.nodes[e.ti];
+      const isHighlighted = hovered && (e.si === this.hoveredIdx || e.ti === this.hoveredIdx);
+      const baseAlpha = 0.06 + (e.weight - t) * 0.3;
+      ctx.beginPath();
+      ctx.moveTo(a.x, a.y);
+      ctx.lineTo(b.x, b.y);
+      if (isHighlighted) {
+        const [r, g, b2] = CLUSTER_COLORS[this.nodes[this.hoveredIdx].cluster % CLUSTER_COLORS.length];
+        ctx.strokeStyle = `rgba(${r},${g},${b2},0.7)`;
+        ctx.lineWidth = 0.8;
+      } else {
+        ctx.strokeStyle = `rgba(255,255,255,${baseAlpha})`;
+        ctx.lineWidth = 0.3 + (e.weight - t) * 0.5;
+      }
+      ctx.stroke();
+    });
+
+    // Draw nodes
+    this.nodes.forEach((n, i) => {
+      const [cr, cg, cb] = CLUSTER_COLORS[n.cluster % CLUSTER_COLORS.length];
+      const isHov = i === this.hoveredIdx;
+      const isConnected = hovered && !isHov && connectedSet.has(i);
+      const isDimmed = hovered && !isHov && !isConnected;
+
+      const alpha = isDimmed ? 0.2 : 1.0;
+      const r = isHov ? n.r * 2.2 : n.r;
+
+      // Outer glow (large, very soft)
+      if (!isDimmed) {
+        const grad = ctx.createRadialGradient(n.x, n.y, 0, n.x, n.y, r * 5);
+        grad.addColorStop(0, `rgba(${cr},${cg},${cb},${isHov ? 0.18 : 0.06})`);
+        grad.addColorStop(1, "rgba(0,0,0,0)");
+        ctx.beginPath();
+        ctx.arc(n.x, n.y, r * 5, 0, Math.PI * 2);
+        ctx.fillStyle = grad;
+        ctx.fill();
+      }
+
+      // Inner glow (medium)
+      if (!isDimmed) {
+        const ig = ctx.createRadialGradient(n.x, n.y, 0, n.x, n.y, r * 2.2);
+        ig.addColorStop(0, `rgba(${cr},${cg},${cb},${isHov ? 0.6 : 0.3})`);
+        ig.addColorStop(1, "rgba(0,0,0,0)");
+        ctx.beginPath();
+        ctx.arc(n.x, n.y, r * 2.2, 0, Math.PI * 2);
+        ctx.fillStyle = ig;
+        ctx.fill();
+      }
+
+      // Core dot
+      ctx.beginPath();
+      ctx.arc(n.x, n.y, r, 0, Math.PI * 2);
+      ctx.fillStyle = `rgba(${cr},${cg},${cb},${alpha * (isHov ? 1 : 0.85)})`;
+      ctx.fill();
+
+      // Bright center highlight
+      if (!isDimmed) {
+        ctx.beginPath();
+        ctx.arc(n.x - r * 0.2, n.y - r * 0.2, r * 0.45, 0, Math.PI * 2);
+        ctx.fillStyle = `rgba(255,255,255,${isHov ? 0.9 : 0.55})`;
+        ctx.fill();
+      }
+
+      // Label on hover or connected
+      if (isHov || isConnected) {
+        const fontSize = Math.max(10, 11 / this.scale);
+        ctx.font = `${fontSize}px -apple-system, sans-serif`;
+        const lbl = n.label.length > 32 ? n.label.slice(0, 32) + "…" : n.label;
+        const tw = ctx.measureText(lbl).width;
+        const lx = n.x + r + 5, ly = n.y + fontSize * 0.35;
+
+        // Label bg
+        ctx.fillStyle = "rgba(8,8,8,0.75)";
+        ctx.fillRect(lx - 2, ly - fontSize * 0.85, tw + 6, fontSize + 3);
+
+        ctx.fillStyle = isHov
+          ? `rgb(${cr},${cg},${cb})`
+          : `rgba(${cr},${cg},${cb},0.7)`;
+        ctx.fillText(lbl, lx, ly);
       }
     });
 
-    // Update nodes
-    Array.from(this.gNodes.children).forEach(el => {
-      const g = el as SVGGElement;
-      const n = nodeMap.get(g.dataset.id ?? "");
-      if (n) g.setAttribute("transform", `translate(${n.x},${n.y})`);
-    });
+    ctx.restore();
   }
 
-  private applyTransform() {
-    if (this.gMain) this.gMain.setAttribute("transform", `translate(${this.tx},${this.ty}) scale(${this.scale})`);
-  }
-
-  private resetView() {
-    this.tx = 0; this.ty = 0; this.scale = 1;
-    this.applyTransform();
-  }
+  private resetView() { this.tx = 0; this.ty = 0; this.scale = 1; this.draw(); }
 
   reLayout() {
-    if (!this.svgEl) return;
-    const W = this.svgEl.clientWidth || 900, H = this.svgEl.clientHeight || 700;
-    this.initLayout(W, H);
-    this.updatePositions();
+    this.initLayout();
     this.startSim();
   }
 }
