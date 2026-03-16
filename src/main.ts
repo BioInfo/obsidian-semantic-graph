@@ -163,7 +163,7 @@ class SemanticGraphSettingTab extends PluginSettingTab {
 
     new Setting(containerEl)
       .setName("Embedding endpoint")
-      .setDesc("OpenAI-compatible /v1/embeddings endpoint.")
+      .setDesc("URL of the /v1/embeddings endpoint.")
       .addText((text) =>
         text
           .setPlaceholder("https://api.openai.com/v1/embeddings")
