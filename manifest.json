@@ -1,7 +1,7 @@
 {
   "id": "semantic-graph",
   "name": "Semantic Graph",
-  "version": "0.1.4",
+  "version": "0.1.5",
   "minAppVersion": "1.0.0",
   "description": "Visualize your vault as a semantic similarity graph \u2014 notes cluster by meaning, not just links. Works with any OpenAI-compatible embedding endpoint (local or cloud).",
   "author": "BioInfo",
